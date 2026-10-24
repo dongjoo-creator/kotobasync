@@ -1,0 +1,18 @@
+{
+  "name": "KotobaSync | AI 일본어 단어장",
+  "short_name": "KotobaSync",
+  "description": "스마트폰과 PC에서 실시간 연동되는 AI 일본어 단어장",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f8fafc",
+  "theme_color": "#4f46e5",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

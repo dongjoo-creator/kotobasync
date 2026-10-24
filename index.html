@@ -1,0 +1,1389 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>KotobaSync | AI 일본어 단어장 (Firebase + PWA)</title>
+  <meta name="theme-color" content="#4f46e5" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="apple-mobile-web-app-title" content="KotobaSync" />
+  <link rel="manifest" href="public/manifest.json" />
+  <link rel="icon" href="public/icon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="public/icon.svg" />
+  <!-- Google Fonts: Noto Sans KR & Noto Sans JP -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700;900&family=Noto+Sans+KR:wght@400;500;700;800&display=swap" rel="stylesheet" />
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['"Noto Sans KR"', '"Noto Sans JP"', 'system-ui', 'sans-serif'],
+            jp: ['"Noto Sans JP"', '"Noto Sans KR"', 'sans-serif'],
+          }
+        }
+      }
+    };
+  </script>
+  <!-- React 18 & Babel & Firebase Compat SDK (App, Auth, Firestore) -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
+  <style>
+    body {
+      background-color: #f8fafc;
+      color: #0f172a;
+      -webkit-font-smoothing: antialiased;
+    }
+    ruby {
+      ruby-align: center;
+    }
+    rt {
+      font-size: 0.58em;
+      font-weight: 600;
+      color: #4f46e5;
+      line-height: 1;
+      user-select: none;
+    }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 9999px; }
+  </style>
+</head>
+<body class="min-h-screen bg-slate-50">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useMemo, useRef } = React;
+
+    // 한자 포함 여부 판별 (순수 히라가나/가타카나 단어는 중복 후리가나 표시 안 함)
+    function hasKanjiCharacter(text) {
+      if (!text) return false;
+      return /[\u4E00-\u9FAF\u3400-\u4DBF々]/.test(text);
+    }
+
+    // TTS 재생 및 검색용 브래킷 제거
+    function stripFuriganaBrackets(text) {
+      if (!text) return '';
+      return text.replace(/\[([^\]]+)\]/g, '');
+    }
+
+    // 한자 위에만 작게 후리가나(<ruby>) 렌더링 헬퍼
+    function renderJapaneseWithFurigana(text, { fallbackKana = '', hideFurigana = false } = {}) {
+      if (!text) return null;
+      const rtClass = hideFurigana
+        ? 'invisible opacity-0 transition-opacity duration-150'
+        : 'opacity-100 transition-opacity duration-150';
+
+      // 1) 문장 내 `한자[후리가나]` 포맷 파싱
+      if (text.includes('[') && text.includes(']')) {
+        const regex = /([\u4E00-\u9FAF\u3400-\u4DBF々ヶ]+)\[([^\]]+)\]/g;
+        const elements = [];
+        let lastIndex = 0;
+        let match;
+        while ((match = regex.exec(text)) !== null) {
+          if (match.index > lastIndex) {
+            elements.push(<span key={`t-${lastIndex}`}>{text.slice(lastIndex, match.index)}</span>);
+          }
+          elements.push(
+            <ruby key={`r-${match.index}`} className="mx-[0.5px]">
+              {match[1]}
+              <rt className={rtClass}>{match[2]}</rt>
+            </ruby>
+          );
+          lastIndex = regex.lastIndex;
+        }
+        if (lastIndex < text.length) {
+          elements.push(<span key="t-end">{text.slice(lastIndex)}</span>);
+        }
+        if (elements.length > 0) return <>{elements}</>;
+      }
+
+      // 2) 단일 표제어에 한자가 포함되어 있고 fallbackKana가 있을 때 오쿠리가나(어미)를 분리해 한자 위에만 후리가나 표시
+      if (fallbackKana && hasKanjiCharacter(text) && text !== fallbackKana) {
+        let suffixLen = 0;
+        while (
+          suffixLen < text.length &&
+          suffixLen < fallbackKana.length &&
+          text[text.length - 1 - suffixLen] === fallbackKana[fallbackKana.length - 1 - suffixLen] &&
+          !hasKanjiCharacter(text[text.length - 1 - suffixLen])
+        ) {
+          suffixLen++;
+        }
+        let prefixLen = 0;
+        while (
+          prefixLen < text.length - suffixLen &&
+          prefixLen < fallbackKana.length - suffixLen &&
+          text[prefixLen] === fallbackKana[prefixLen] &&
+          !hasKanjiCharacter(text[prefixLen])
+        ) {
+          prefixLen++;
+        }
+        const prefix = text.slice(0, prefixLen);
+        const kanjiCore = text.slice(prefixLen, text.length - suffixLen);
+        const suffix = text.slice(text.length - suffixLen);
+        const kanaCore = fallbackKana.slice(prefixLen, fallbackKana.length - suffixLen);
+
+        if (kanjiCore && kanaCore) {
+          return (
+            <>
+              {prefix && <span>{prefix}</span>}
+              <ruby className="mx-[0.5px]">
+                {kanjiCore}
+                <rt className={rtClass}>{kanaCore}</rt>
+              </ruby>
+              {suffix && <span>{suffix}</span>}
+            </>
+          );
+        }
+      }
+
+      // 3) 한자가 없는 히라가나/가타카나 단어는 그대로 표시 (우측에 중복 히라가나 표기 없음)
+      return <span>{text}</span>;
+    }
+
+    // 초기 샘플 데이터 (한글 발음 제거, 학습중/암기완료 2단계, 모든 예문 한자[후리가나] 루비 적용)
+    const INITIAL_SEED_WORDS = [
+      {
+        id: 'seed-word-1',
+        kanji: '勉強',
+        kana: 'べんきょう',
+        memorization_status: 'learning',
+        is_favorite: true,
+        created_at: '2026-10-24T07:00:00.000Z',
+        updated_at: '2026-10-24T07:00:00.000Z',
+        meanings: [
+          {
+            id: 'm-1-1',
+            partOfSpeech: '명사·스루(する)동사',
+            definition: '공부, 학업, 학습',
+            examples: [
+              {
+                id: 'ex-1-1',
+                japanese: '毎日[まいにち]カフェで日本語[にほんご]を勉強[べんきょう]しています。',
+                korean: '매일 카페에서 일본어를 공부하고 있습니다.',
+              },
+              {
+                id: 'ex-1-2',
+                japanese: '試験[しけん]のために遅[おそ]くまで勉強[べんきょう]した。',
+                korean: '시험을 위해 늦게까지 공부했다.',
+              },
+            ],
+          },
+          {
+            id: 'm-1-2',
+            partOfSpeech: '명사·스루(する)동사',
+            definition: '(가게에서 값을) 깎아줌, 할인, 에누리',
+            examples: [
+              {
+                id: 'ex-1-3',
+                japanese: 'もうちょっと勉強[べんきょう]してくださいよ。',
+                korean: '조금만 더 깎아 주세요.',
+              },
+            ],
+          },
+          {
+            id: 'm-1-3',
+            partOfSpeech: '명사',
+            definition: '좋은 경험, 교훈',
+            examples: [
+              {
+                id: 'ex-1-4',
+                japanese: '今回[こんかい]の失敗[しっぱい]はとてもいい勉強[べんきょう]になりました。',
+                korean: '이번 실패는 아주 좋은 교훈(공부)이 되었습니다.',
+              },
+            ],
+          },
+        ],
+      },
+      {
+        id: 'seed-word-2',
+        kanji: '桜',
+        kana: 'さくら',
+        memorization_status: 'memorized',
+        is_favorite: true,
+        created_at: '2026-10-24T06:50:00.000Z',
+        updated_at: '2026-10-24T06:50:00.000Z',
+        meanings: [
+          {
+            id: 'm-2-1',
+            partOfSpeech: '명사',
+            definition: '벚나무, 벚꽃',
+            examples: [
+              {
+                id: 'ex-2-1',
+                japanese: '春[はる]になると公園[こうえん]の桜[さくら]がきれいに咲[さ]きます。',
+                korean: '봄이 되면 공원의 벚꽃이 예쁘게 핍니다.',
+              },
+            ],
+          },
+          {
+            id: 'm-2-2',
+            partOfSpeech: '명사 (은어)',
+            definition: '바람잡이, 호객꾼 (가짜 손님)',
+            examples: [
+              {
+                id: 'ex-2-2',
+                japanese: 'あの行列[ぎょうれつ]にはサクラが混[ま]じっているらしい。',
+                korean: '저 줄에는 바람잡이(가짜 손님)가 섞여 있는 것 같다.',
+              },
+            ],
+          },
+        ],
+      },
+      {
+        id: 'seed-word-3',
+        kanji: '可愛い',
+        kana: 'かわいい',
+        memorization_status: 'memorized',
+        is_favorite: false,
+        created_at: '2026-10-24T06:40:00.000Z',
+        updated_at: '2026-10-24T06:40:00.000Z',
+        meanings: [
+          {
+            id: 'm-3-1',
+            partOfSpeech: 'い형용사',
+            definition: '귀엽다, 사랑스럽다, 깜찍하다',
+            examples: [
+              {
+                id: 'ex-3-1',
+                japanese: 'この子犬[こいぬ]は本当[ほんとう]に可愛[かわい]いですね。',
+                korean: '이 강아지는 정말 귀엽네요.',
+              },
+            ],
+          },
+          {
+            id: 'm-3-2',
+            partOfSpeech: 'い형용사',
+            definition: '(크기나 정도가) 작고 아담하다, 애교스럽다',
+            examples: [
+              {
+                id: 'ex-3-2',
+                japanese: '可愛[かわい]いサイズのバッグを買[か]いました。',
+                korean: '아담하고 귀여운 사이즈의 가방을 샀습니다.',
+              },
+            ],
+          },
+        ],
+      },
+      {
+        id: 'seed-word-4',
+        kanji: 'かける',
+        kana: 'かける',
+        memorization_status: 'learning',
+        is_favorite: true,
+        created_at: '2026-10-24T06:30:00.000Z',
+        updated_at: '2026-10-24T06:30:00.000Z',
+        meanings: [
+          {
+            id: 'm-4-1',
+            partOfSpeech: '2류동사 (타동사)',
+            definition: '(안경 등을) 쓰다, 걸다',
+            examples: [
+              {
+                id: 'ex-4-1',
+                japanese: '黒縁[くろぶち]の眼鏡[めがね]をかけている人[ひと]です。',
+                korean: '검은 테 안경을 쓰고 있는 사람입니다.',
+              },
+            ],
+          },
+          {
+            id: 'm-4-2',
+            partOfSpeech: '2류동사 (타동사)',
+            definition: '(전화를) 걸다',
+            examples: [
+              {
+                id: 'ex-4-2',
+                japanese: '後[あと]でまた電話[でんわ]をかけますね。',
+                korean: '나중에 다시 전화를 걸게요.',
+              },
+            ],
+          },
+          {
+            id: 'm-4-3',
+            partOfSpeech: '2류동사 (타동사)',
+            definition: '(시간·돈·수고를) 들이다, 소비하다',
+            examples: [
+              {
+                id: 'ex-4-3',
+                japanese: '時間[じかん]をかけて丁寧[ていねい]に作[つく]りました。',
+                korean: '시간을 들여 정성껏 만들었습니다.',
+              },
+            ],
+          },
+        ],
+      },
+      {
+        id: 'seed-word-5',
+        kanji: 'あまい',
+        kana: 'あまい',
+        memorization_status: 'learning',
+        is_favorite: false,
+        created_at: '2026-10-24T06:20:00.000Z',
+        updated_at: '2026-10-24T06:20:00.000Z',
+        meanings: [
+          {
+            id: 'm-5-1',
+            partOfSpeech: 'い형용사',
+            definition: '(맛이) 달다, 달콤하다',
+            examples: [
+              {
+                id: 'ex-5-1',
+                japanese: '疲[つか]れた時[とき]はあまいものが食[た]べたくなります。',
+                korean: '피곤할 때는 단것이 먹고 싶어집니다.',
+              },
+            ],
+          },
+          {
+            id: 'm-5-2',
+            partOfSpeech: 'い형용사',
+            definition: '(생각이나 태도가) 무르다, 순진하다, 만만하다',
+            examples: [
+              {
+                id: 'ex-5-2',
+                japanese: '社会[しゃかい]はそんなにあまくないよ。',
+                korean: '사회는 그렇게 만만하지 않아.',
+              },
+            ],
+          },
+        ],
+      },
+    ];
+
+    const FALLBACK_PRONUNCIATION_DICT = {
+      '사쿠라': [
+        {
+          kanji: '桜',
+          kana: 'さくら',
+          nuance: '봄에 피는 벚꽃·벚나무를 뜻하는 대표 명사 및 은어(바람잡이)',
+          meanings: [
+            {
+              partOfSpeech: '명사',
+              definition: '벚꽃, 벚나무',
+              examples: [{ japanese: '今年[ことし]は桜[さくら]の開花[かいか]が早[はや]いそうです。', korean: '올해는 벚꽃 개화가 빠르다고 합니다.' }]
+            },
+            {
+              partOfSpeech: '명사 (은어)',
+              definition: '바람잡이, 가짜 손님 (サクラ)',
+              examples: [{ japanese: 'イベントにサクラを動員[どういん]する。', korean: '이벤트에 바람잡이를 동원하다.' }]
+            }
+          ]
+        }
+      ],
+      '벤쿄': [
+        {
+          kanji: '勉強',
+          kana: 'べんきょう',
+          nuance: '학업 공부뿐만 아니라 가격 할인(에누리), 좋은 경험이라는 뜻도 가진 다의어',
+          meanings: [
+            {
+              partOfSpeech: '명사·스루동사',
+              definition: '공부, 학업, 학습',
+              examples: [{ japanese: '図書館[としょかん]で日本語[にほんご]を勉強[べんきょう]します。', korean: '도서관에서 일본어를 공부합니다.' }]
+            },
+            {
+              partOfSpeech: '명사·스루동사',
+              definition: '(가격을) 할인함, 값을 깎아줌',
+              examples: [{ japanese: '2つ買[か]うから少[すこ]し勉強[べんきょう]してよ。', korean: '두 개 살 테니까 조금 깎아줘요.' }]
+            }
+          ]
+        }
+      ],
+      '카와이': [
+        {
+          kanji: '可愛い',
+          kana: 'かわいい',
+          nuance: '귀엽다, 사랑스럽다 / 크기가 아담하다',
+          meanings: [
+            {
+              partOfSpeech: 'い형용사',
+              definition: '귀엽다, 사랑스럽다',
+              examples: [{ japanese: '猫[ねこ]のしぐさがとても可愛[かわい]い。', korean: '고양이의 몸짓이 매우 귀엽다.' }]
+            },
+            {
+              partOfSpeech: 'い형용사',
+              definition: '작고 아담하다, 앙증맞다',
+              examples: [{ japanese: '可愛[かわい]い小皿[こざら]を集[あつ]めています。', korean: '앙증맞은 작은 접시를 모으고 있습니다.' }]
+            }
+          ]
+        }
+      ],
+      '하시': [
+        {
+          kanji: '橋',
+          kana: 'はし',
+          nuance: '강이나 도로 위에 놓은 다리 (억양: はし↗)',
+          meanings: [{ partOfSpeech: '명사', definition: '다리, 교량', examples: [{ japanese: '川[かわ]の向[む]こうへ橋[はし]を渡[わた]る。', korean: '강 건너편으로 다리를 건너다.' }] }]
+        },
+        {
+          kanji: '箸',
+          kana: 'はし',
+          nuance: '음식을 집어 먹는 젓가락 (억양: は↘し)',
+          meanings: [{ partOfSpeech: '명사', definition: '젓가락', examples: [{ japanese: 'お箸[はし]の使[つか]い方[かた]が上手[じょうず]ですね。', korean: '젓가락 사용법이 능숙하시네요.' }] }]
+        },
+        {
+          kanji: '端',
+          kana: 'はし',
+          nuance: '물건이나 길의 끝, 가장자리 (억양: はし→)',
+          meanings: [{ partOfSpeech: '명사', definition: '끝, 가장자리, 모퉁이', examples: [{ japanese: '道[みち]の端[はし]を歩[ある]いてください。', korean: '길 가장자리로 걸어 주세요.' }] }]
+        }
+      ],
+      '타베루': [
+        {
+          kanji: '食べる',
+          kana: 'たべる',
+          nuance: '음식을 먹다 / 생계를 유지하다',
+          meanings: [
+            { partOfSpeech: '2류동사', definition: '(음식을) 먹다, 식사하다', examples: [{ japanese: '朝[あさ]ご飯[はん]はしっかり食[た]べます。', korean: '아침밥은 든든히 먹습니다.' }] },
+            { partOfSpeech: '2류동사', definition: '먹고살다, 생활하다', examples: [{ japanese: '好[す]きな仕事[しごと]で食[た]べていく。', korean: '좋아하는 일로 먹고살아 가다.' }] }
+          ]
+        }
+      ]
+    };
+
+    const STORAGE_KEY_WORDS = 'kotobasync_words_v2';
+    const STORAGE_KEY_CONFIG = 'kotobasync_config_v1';
+
+    function speakJapanese(text) {
+      if (!('speechSynthesis' in window)) return;
+      window.speechSynthesis.cancel();
+      const u = new SpeechSynthesisUtterance(stripFuriganaBrackets(text));
+      u.lang = 'ja-JP';
+      u.rate = 0.9;
+      window.speechSynthesis.speak(u);
+    }
+
+    function App() {
+      const [words, setWords] = useState(() => {
+        try {
+          const saved = localStorage.getItem(STORAGE_KEY_WORDS);
+          return saved ? JSON.parse(saved) : INITIAL_SEED_WORDS;
+        } catch {
+          return INITIAL_SEED_WORDS;
+        }
+      });
+      const [selectedWordId, setSelectedWordId] = useState(INITIAL_SEED_WORDS[0].id);
+
+      const [config, setConfig] = useState(() => {
+        try {
+          const saved = localStorage.getItem(STORAGE_KEY_CONFIG);
+          return saved
+            ? JSON.parse(saved)
+            : { firebaseProjectId: '', firebaseApiKey: '', geminiApiKey: '' };
+        } catch {
+          return { firebaseProjectId: '', firebaseApiKey: '', geminiApiKey: '' };
+        }
+      });
+      const [syncStatus, setSyncStatus] = useState('local-sync');
+      const [userEmail, setUserEmail] = useState(null);
+
+      // 학습 모드 상태 (단어 숨기기 / 뜻 숨기기 / 후리가나 숨기기)
+      const [searchQuery, setSearchQuery] = useState('');
+      const [sortBy, setSortBy] = useState('latest'); // 'latest' | 'kana' | 'status'
+      const [statusFilter, setStatusFilter] = useState('all'); // 'all' | 'learning' | 'memorized' | 'favorite'
+      const [hideWord, setHideWord] = useState(false);
+      const [hideMeaning, setHideMeaning] = useState(false);
+      const [hideFurigana, setHideFurigana] = useState(false);
+      const [revealedWordIds, setRevealedWordIds] = useState(new Set());
+      const [revealedMeaningIds, setRevealedMeaningIds] = useState(new Set());
+
+      // 설정 모달
+      const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
+
+      // 상단 메인 단어 추가 바 상태
+      const [addInput, setAddInput] = useState('');
+      const [isSearchingAI, setIsSearchingAI] = useState(false);
+      const [isAddDrawerOpen, setIsAddDrawerOpen] = useState(false);
+      const [candidates, setCandidates] = useState([]);
+      const [selectedCandIdx, setSelectedCandIdx] = useState(0);
+      const [newKanji, setNewKanji] = useState('');
+      const [newKana, setNewKana] = useState('');
+      const [newMeanings, setNewMeanings] = useState([]);
+
+      // 상세 편집 상태
+      const [isEditingHeader, setIsEditingHeader] = useState(false);
+      const [editKanji, setEditKanji] = useState('');
+      const [editKana, setEditKana] = useState('');
+      const [generatingMeaningId, setGeneratingMeaningId] = useState(null);
+      const [isAddingMeaning, setIsAddingMeaning] = useState(false);
+      const [addMeaningPos, setAddMeaningPos] = useState('명사');
+      const [addMeaningDef, setAddMeaningDef] = useState('');
+
+      const dbRef = useRef(null);
+      const authRef = useRef(null);
+      const userUidRef = useRef(null);
+
+      const getCollectionPath = () => {
+        return userUidRef.current ? `users/${userUidRef.current}/words` : 'kotobasync_words';
+      };
+
+      useEffect(() => {
+        localStorage.setItem(STORAGE_KEY_WORDS, JSON.stringify(words));
+      }, [words]);
+
+      useEffect(() => {
+        if (config.firebaseProjectId && config.firebaseApiKey && window.firebase) {
+          try {
+            const fbConfig = {
+              apiKey: config.firebaseApiKey.trim(),
+              authDomain: `${config.firebaseProjectId.trim()}.firebaseapp.com`,
+              projectId: config.firebaseProjectId.trim(),
+            };
+            const app = window.firebase.apps.length ? window.firebase.app() : window.firebase.initializeApp(fbConfig);
+            const db = window.firebase.firestore(app);
+            const auth = window.firebase.auth(app);
+            dbRef.current = db;
+            authRef.current = auth;
+
+            let unsubSnapshot = null;
+            const subscribeCol = () => {
+              if (unsubSnapshot) unsubSnapshot();
+              const colRef = db.collection(getCollectionPath());
+              colRef.get().then(snap => {
+                if (snap.empty) {
+                  INITIAL_SEED_WORDS.forEach(seed => colRef.doc(seed.id).set(seed));
+                }
+              }).catch(() => {});
+
+              unsubSnapshot = colRef.orderBy('created_at', 'desc').onSnapshot(
+                snap => {
+                  const list = [];
+                  snap.forEach(doc => list.push(doc.data()));
+                  if (list.length > 0) setWords(list);
+                  setSyncStatus('firebase-live');
+                },
+                () => {
+                  setSyncStatus('local-sync');
+                }
+              );
+            };
+
+            const unsubAuth = auth.onAuthStateChanged(user => {
+              userUidRef.current = user ? user.uid : null;
+              setUserEmail(user ? user.email : null);
+              subscribeCol();
+            });
+
+            return () => {
+              if (unsubSnapshot) unsubSnapshot();
+              if (unsubAuth) unsubAuth();
+            };
+          } catch (e) {
+            setSyncStatus('local-sync');
+          }
+        } else {
+          dbRef.current = null;
+          setSyncStatus('local-sync');
+        }
+      }, [config.firebaseProjectId, config.firebaseApiKey]);
+
+      const filteredAndSortedWords = useMemo(() => {
+        const q = searchQuery.trim().toLowerCase();
+        const filtered = words.filter(w => {
+          if (statusFilter === 'favorite' && !w.is_favorite) return false;
+          if (statusFilter !== 'all' && statusFilter !== 'favorite' && w.memorization_status !== statusFilter) return false;
+          if (!q) return true;
+          return (
+            w.kanji.toLowerCase().includes(q) ||
+            w.kana.toLowerCase().includes(q) ||
+            w.meanings.some(m => m.definition.toLowerCase().includes(q))
+          );
+        });
+
+        const collator = new Intl.Collator('ja', { sensitivity: 'base' });
+        const statusOrder = { learning: 0, memorized: 1 };
+
+        return [...filtered].sort((a, b) => {
+          if (sortBy === 'latest') return new Date(b.created_at) - new Date(a.created_at);
+          if (sortBy === 'kana') return collator.compare(a.kana || a.kanji, b.kana || b.kanji);
+          if (sortBy === 'status') return statusOrder[a.memorization_status] - statusOrder[b.memorization_status];
+          return 0;
+        });
+      }, [words, searchQuery, sortBy, statusFilter]);
+
+      const selectedWord = useMemo(
+        () => words.find(w => w.id === selectedWordId) || words[0] || null,
+        [words, selectedWordId]
+      );
+
+      useEffect(() => {
+        if (selectedWord) {
+          setEditKanji(selectedWord.kanji);
+          setEditKana(selectedWord.kana);
+          setIsEditingHeader(false);
+        }
+      }, [selectedWord?.id]);
+
+      const updateWordItem = async (updated) => {
+        const withTime = { ...updated, updated_at: new Date().toISOString() };
+        setWords(prev => prev.map(w => w.id === withTime.id ? withTime : w));
+        if (dbRef.current) {
+          await dbRef.current.collection(getCollectionPath()).doc(withTime.id).set(withTime).catch(() => {});
+        }
+      };
+
+      const deleteWordItem = async (id) => {
+        setWords(prev => prev.filter(w => w.id !== id));
+        if (dbRef.current) {
+          await dbRef.current.collection(getCollectionPath()).doc(id).delete().catch(() => {});
+        }
+      };
+
+      // Gemini API 사용 가능 모델 자동 탐색(ListModels) 및 호출 헬퍼
+      let cachedWorkingModel = null;
+
+      async function callGeminiJSON(apiKey, prompt, temperature = 0.3) {
+        const cleanKey = (apiKey || '').trim();
+        if (!cleanKey) {
+          throw new Error('NO_API_KEY');
+        }
+
+        // 1. 해당 API 키로 실제 사용 가능한 generateContent 지원 모델 목록 조회
+        let modelsToTry = [];
+        if (cachedWorkingModel) {
+          modelsToTry.push(cachedWorkingModel);
+        }
+
+        try {
+          const listRes = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(cleanKey)}`
+          );
+          if (listRes.ok) {
+            const listData = await listRes.json();
+            const available = (listData.models || [])
+              .filter(
+                (m) =>
+                  Array.isArray(m.supportedGenerationMethods) &&
+                  m.supportedGenerationMethods.includes('generateContent') &&
+                  m.name.includes('gemini') &&
+                  !m.name.includes('vision') &&
+                  !m.name.includes('embedding') &&
+                  !m.name.includes('imagen') &&
+                  !m.name.includes('tts') &&
+                  !m.name.includes('audio')
+              )
+              .map((m) => m.name.replace(/^models\//, ''));
+
+            // flash 계열 모델을 우선순위로 정렬
+            available.sort((a, b) => {
+              const aFlash = a.includes('flash') ? 0 : 1;
+              const bFlash = b.includes('flash') ? 0 : 1;
+              if (aFlash !== bFlash) return aFlash - bFlash;
+              return b.localeCompare(a);
+            });
+
+            for (const m of available) {
+              if (!modelsToTry.includes(m)) modelsToTry.push(m);
+            }
+          } else {
+            const errJson = await listRes.json().catch(() => ({}));
+            throw new Error(errJson?.error?.message || `API 키 확인 실패 (HTTP ${listRes.status})`);
+          }
+        } catch (listErr) {
+          if (modelsToTry.length === 0) {
+            modelsToTry = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-pro'];
+          }
+        }
+
+        let lastErrorMsg = '';
+        for (const model of modelsToTry) {
+          try {
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(cleanKey)}`;
+            const res = await fetch(url, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                contents: [{ parts: [{ text: prompt }] }],
+                generationConfig: {
+                  temperature,
+                },
+              }),
+            });
+            if (res.ok) {
+              const data = await res.json();
+              const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+              // JSON 배열 또는 객체 부분만 안전하게 추출
+              const cleaned = rawText.replace(/```json\s*|```\s*/g, '').trim();
+              const jsonMatch = cleaned.match(/(\[[\s\S]*\]|\{[\s\S]*\})/);
+              const targetStr = jsonMatch ? jsonMatch[1] : cleaned;
+              if (targetStr) {
+                const parsed = JSON.parse(targetStr);
+                cachedWorkingModel = model;
+                return parsed;
+              }
+            } else {
+              const errJson = await res.json().catch(() => ({}));
+              lastErrorMsg = errJson?.error?.message || `HTTP ${res.status}`;
+            }
+          } catch (err) {
+            lastErrorMsg = err?.message || '파싱 오류';
+          }
+        }
+        throw new Error(lastErrorMsg || '사용 가능한 Gemini 모델을 찾지 못했습니다.');
+      }
+
+      // 상단 메인 입력창: AI 후보 제안 및 즉시 추가
+      const handleQuickAddSearch = async (overrideQuery) => {
+        const q = (overrideQuery ?? addInput).trim();
+        if (!q) return;
+        if (overrideQuery) setAddInput(overrideQuery);
+        setIsSearchingAI(true);
+        setIsAddDrawerOpen(true);
+
+        let activeApiKey = (config.geminiApiKey || '').trim();
+        if (!activeApiKey) {
+          try {
+            const savedCfg = JSON.parse(localStorage.getItem(STORAGE_KEY_CONFIG) || '{}');
+            activeApiKey = (savedCfg.geminiApiKey || '').trim();
+          } catch {}
+        }
+
+        try {
+          if (activeApiKey) {
+            const prompt = `사용자가 일본어 단어장에 단어를 추가하기 위해 "${q}"을(를) 입력했습니다. 이에 대응하는 일본어 단어 후보들을 최대 3개까지 제안해 주세요. 예문(japanese)의 모든 한자 뒤에는 반드시 대괄호 [후리가나]를 표기해 한자 위에 루비를 렌더링할 수 있게 하세요(예: 毎日[まいにち]日本語[にほんご]を勉強[べんきょう]します。). JSON 배열([{ "kanji": "", "kana": "", "nuance": "", "meanings": [{ "partOfSpeech": "", "definition": "", "examples": [{ "japanese": "", "korean": "" }] }] }])로만 응답하세요.`;
+            const parsed = await callGeminiJSON(activeApiKey, prompt, 0.3);
+            if (Array.isArray(parsed) && parsed.length > 0) {
+              setCandidates(parsed);
+              selectCandidate(parsed[0], 0);
+              setIsSearchingAI(false);
+              return;
+            }
+          }
+
+          const found = FALLBACK_PRONUNCIATION_DICT[q] || [{
+            kanji: q,
+            kana: q,
+            nuance: activeApiKey
+              ? 'AI 응답을 가져오지 못했습니다. 아래에서 직접 확인 후 저장하세요.'
+              : '우측 상단 [⚙️ 설정]에서 Gemini API 키를 입력하고 [설정 저장]을 누르면 모든 입력을 자동 변환합니다.',
+            meanings: [{ partOfSpeech: '명사', definition: `${q}의 뜻`, examples: [{ japanese: `${q}を使[つか]った例文[れいぶん]です。`, korean: `${q}을(를) 사용한 예문입니다.` }] }]
+          }];
+          setCandidates(found);
+          selectCandidate(found[0], 0);
+        } catch (err) {
+          const found = FALLBACK_PRONUNCIATION_DICT[q] || [{
+            kanji: q,
+            kana: q,
+            nuance: `⚠️ Gemini API 호출 오류: ${err.message}. 우측 상단 [⚙️ 설정]에서 API 키가 정확한지 확인해 주세요.`,
+            meanings: [{ partOfSpeech: '명사', definition: `${q}의 뜻`, examples: [{ japanese: `${q}を使[つか]った例文[れいぶん]です。`, korean: `${q}을(를) 사용한 예문입니다.` }] }]
+          }];
+          setCandidates(found);
+          selectCandidate(found[0], 0);
+        } finally {
+          setIsSearchingAI(false);
+        }
+      };
+
+      const selectCandidate = (cand, idx) => {
+        setSelectedCandIdx(idx);
+        setNewKanji(cand.kanji);
+        setNewKana(cand.kana);
+        setNewMeanings(cand.meanings.map((m, i) => ({
+          id: `m-${Date.now()}-${i}`,
+          partOfSpeech: m.partOfSpeech,
+          definition: m.definition,
+          examples: (m.examples || []).map((ex, j) => ({ id: `ex-${Date.now()}-${i}-${j}`, japanese: ex.japanese, korean: ex.korean }))
+        })));
+      };
+
+      const handleSaveNewWord = async (e) => {
+        if (e) e.preventDefault();
+        if (!newKanji.trim()) return;
+        const nowIso = new Date().toISOString();
+        const item = {
+          id: `word-${Date.now()}`,
+          kanji: newKanji.trim(),
+          kana: newKana.trim() || stripFuriganaBrackets(newKanji.trim()),
+          meanings: newMeanings.filter(m => m.definition.trim()),
+          memorization_status: 'learning',
+          is_favorite: false,
+          created_at: nowIso,
+          updated_at: nowIso,
+        };
+        // 새로 추가한 단어가 항상 가장 위에 표시되도록 최신순('latest')으로 전환 후 맨 앞에 추가
+        setSortBy('latest');
+        if (statusFilter === 'memorized' || statusFilter === 'favorite') {
+          setStatusFilter('all');
+        }
+        setWords(prev => [item, ...prev]);
+        setSelectedWordId(item.id);
+        if (dbRef.current) {
+          await dbRef.current.collection(getCollectionPath()).doc(item.id).set(item).catch(() => {});
+        }
+        setIsAddDrawerOpen(false);
+        setAddInput('');
+        setCandidates([]);
+      };
+
+      // 특정 뜻에 대한 AI 예문 자동 생성 (한자[후리가나] 포맷)
+      const handleGenerateAIExample = async (meaning) => {
+        if (!selectedWord) return;
+        setGeneratingMeaningId(meaning.id);
+        try {
+          const rubyWord = hasKanjiCharacter(selectedWord.kanji) && selectedWord.kanji !== selectedWord.kana
+            ? `${selectedWord.kanji}[${selectedWord.kana}]`
+            : selectedWord.kanji;
+
+          let generated = {
+            japanese: `「${rubyWord}」は日常会話[にちじょうかいわ]でもよく使[つか]われます。`,
+            korean: `'${selectedWord.kanji}'는 '${meaning.definition}'(이)라는 의미로 일상 회화에서도 자주 쓰입니다.`
+          };
+
+          let activeApiKey = (config.geminiApiKey || '').trim();
+          if (!activeApiKey) {
+            try {
+              const savedCfg = JSON.parse(localStorage.getItem(STORAGE_KEY_CONFIG) || '{}');
+              activeApiKey = (savedCfg.geminiApiKey || '').trim();
+            } catch {}
+          }
+
+          if (activeApiKey) {
+            const prompt = `일본어 단어 "${selectedWord.kanji}"(독음: "${selectedWord.kana}")의 뜻 중 "${meaning.definition}" 의미로 쓰인 자연스러운 일본어 예문 1개를 생성하세요. 모든 한자 뒤에는 반드시 [후리가나]를 붙여 JSON({"japanese": "毎日[まいにち]...", "korean": ""})으로만 응답하세요.`;
+            const parsed = await callGeminiJSON(activeApiKey, prompt, 0.6);
+            if (parsed && parsed.japanese) generated = parsed;
+          }
+
+          const newEx = { id: `ex-${Date.now()}`, ...generated };
+          const updatedMeanings = selectedWord.meanings.map(m =>
+            m.id === meaning.id ? { ...m, examples: [...m.examples, newEx] } : m
+          );
+          await updateWordItem({ ...selectedWord, meanings: updatedMeanings });
+        } catch (err) {
+          alert(`AI 예문 생성 오류: ${err.message}`);
+        } finally {
+          setGeneratingMeaningId(null);
+        }
+      };
+
+      const memorizedCount = words.filter(w => w.memorization_status === 'memorized').length;
+
+      const renderDetailCard = (targetWord, isInlineMobile = false) => {
+        if (!targetWord) return null;
+        return (
+          <div className={`rounded-2xl border border-indigo-200 bg-white p-4 sm:p-5 shadow-sm ${isInlineMobile ? 'border-l-4 border-l-indigo-600 bg-indigo-50/10' : ''}`}>
+            <div className="border-b border-slate-100 pb-4">
+              {isEditingHeader ? (
+                <div className="space-y-2 rounded-xl bg-slate-50 p-3">
+                  <div className="grid grid-cols-2 gap-2">
+                    <input value={editKanji} onChange={e => setEditKanji(e.target.value)} className="rounded border px-2 py-1 font-jp text-sm font-bold" placeholder="일본어 표기" />
+                    <input value={editKana} onChange={e => setEditKana(e.target.value)} className="rounded border px-2 py-1 font-jp text-sm" placeholder="히라가나 독음" />
+                  </div>
+                  <div className="flex justify-end gap-1.5">
+                    <button onClick={() => setIsEditingHeader(false)} className="rounded bg-white px-2.5 py-1 text-xs border">취소</button>
+                    <button
+                      onClick={() => {
+                        updateWordItem({ ...targetWord, kanji: editKanji, kana: editKana });
+                        setIsEditingHeader(false);
+                      }}
+                      className="rounded bg-indigo-600 px-3 py-1 text-xs font-bold text-white"
+                    >
+                      저장
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2.5">
+                    <h2 className="font-jp text-2xl sm:text-3xl font-black leading-relaxed text-slate-900">
+                      {renderJapaneseWithFurigana(targetWord.kanji, { fallbackKana: targetWord.kana, hideFurigana })}
+                    </h2>
+                    <button onClick={() => speakJapanese(targetWord.kana || targetWord.kanji)} className="rounded-lg bg-indigo-50 px-2 py-1 text-xs text-indigo-600">🔊</button>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <button
+                      onClick={() => updateWordItem({ ...targetWord, memorization_status: targetWord.memorization_status === 'memorized' ? 'learning' : 'memorized' })}
+                      className={`rounded-full border px-2.5 py-1 text-xs font-bold ${targetWord.memorization_status === 'memorized' ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-amber-200 bg-amber-50 text-amber-700'}`}
+                    >
+                      {targetWord.memorization_status === 'memorized' ? '✅ 암기완료' : '⏳ 학습중'}
+                    </button>
+                    <button onClick={() => setIsEditingHeader(true)} className="rounded-lg border px-2 py-1 text-xs font-semibold text-slate-600 hover:bg-slate-50" title="표기 수정">✏️</button>
+                    <button onClick={() => deleteWordItem(targetWord.id)} className="rounded-lg border border-rose-200 px-2 py-1 text-xs font-semibold text-rose-600 hover:bg-rose-50" title="삭제">🗑️</button>
+                    {isInlineMobile && (
+                      <button
+                        onClick={() => setSelectedWordId(null)}
+                        className="rounded-lg bg-slate-100 px-2 py-1 text-xs font-bold text-slate-500 hover:bg-slate-200 lg:hidden"
+                        title="상세 접기"
+                      >
+                        ▲ 접기
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* 다의어 뜻 및 AI 예문 목록 */}
+            <div className="mt-4 space-y-4">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-slate-500">다의어 뜻 & AI 예문 ({targetWord.meanings.length}개 뜻)</span>
+                <button onClick={() => setIsAddingMeaning(!isAddingMeaning)} className="rounded-lg bg-indigo-50 px-2.5 py-1 text-xs font-bold text-indigo-600">+ 새 뜻 추가</button>
+              </div>
+
+              {isAddingMeaning && (
+                <div className="space-y-2 rounded-xl border border-indigo-200 bg-indigo-50/40 p-3">
+                  <div className="grid grid-cols-3 gap-2">
+                    <input value={addMeaningPos} onChange={e => setAddMeaningPos(e.target.value)} placeholder="품사" className="rounded border bg-white px-2 py-1 text-xs" />
+                    <input value={addMeaningDef} onChange={e => setAddMeaningDef(e.target.value)} placeholder="새로운 한국어 뜻 입력" className="col-span-2 rounded border bg-white px-2 py-1 text-xs font-bold" />
+                  </div>
+                  <div className="flex justify-end gap-1.5">
+                    <button onClick={() => setIsAddingMeaning(false)} className="rounded bg-white px-2.5 py-1 text-xs border">취소</button>
+                    <button
+                      onClick={() => {
+                        if (!addMeaningDef.trim()) return;
+                        const nextM = [...targetWord.meanings, { id: `m-${Date.now()}`, partOfSpeech: addMeaningPos, definition: addMeaningDef.trim(), examples: [] }];
+                        updateWordItem({ ...targetWord, meanings: nextM });
+                        setAddMeaningDef('');
+                        setIsAddingMeaning(false);
+                      }}
+                      className="rounded bg-indigo-600 px-3 py-1 text-xs font-bold text-white"
+                    >
+                      추가
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {targetWord.meanings.map((meaning, mIdx) => (
+                <div key={meaning.id || mIdx} className="rounded-2xl border border-slate-200 bg-slate-50/60 p-4">
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    <div>
+                      <span className="rounded bg-slate-200 px-1.5 py-0.5 text-[11px] font-bold text-slate-700">뜻 {mIdx + 1} · {meaning.partOfSpeech}</span>
+                      <h4 className="mt-1 text-base font-extrabold text-slate-900">{meaning.definition}</h4>
+                    </div>
+                    <button
+                      disabled={generatingMeaningId === meaning.id}
+                      onClick={() => handleGenerateAIExample(meaning)}
+                      className="rounded-xl bg-gradient-to-r from-indigo-600 to-violet-600 px-3 py-1.5 text-xs font-bold text-white shadow-sm hover:opacity-95 disabled:opacity-50"
+                    >
+                      {generatingMeaningId === meaning.id ? '⏳ 생성 중...' : '✨ AI 예문 생성'}
+                    </button>
+                  </div>
+
+                  <div className="mt-3 space-y-2 border-t border-slate-200/70 pt-3">
+                    {meaning.examples.map(ex => (
+                      <div key={ex.id} className="rounded-xl border border-slate-200 bg-white p-3">
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="space-y-1">
+                            <p className="font-jp text-sm font-bold leading-relaxed text-slate-900">
+                              {renderJapaneseWithFurigana(ex.japanese, { hideFurigana })}
+                            </p>
+                            <p className="text-xs font-medium text-slate-600">{ex.korean}</p>
+                          </div>
+                          <div className="flex gap-1">
+                            <button onClick={() => speakJapanese(ex.japanese)} className="text-xs text-slate-400 hover:text-indigo-600">🔊</button>
+                            <button
+                              onClick={() => {
+                                const nextM = targetWord.meanings.map(m =>
+                                  m.id === meaning.id ? { ...m, examples: m.examples.filter(item => item.id !== ex.id) } : m
+                                );
+                                updateWordItem({ ...targetWord, meanings: nextM });
+                              }}
+                              className="text-xs text-slate-400 hover:text-rose-600"
+                            >
+                              ✕
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        );
+      };
+
+      return (
+        <div className="min-h-screen flex flex-col pb-16">
+          {/* 상단 헤더 */}
+          <header className="sticky top-0 z-30 border-b border-slate-200 bg-white/90 backdrop-blur-md">
+            <div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-3 sm:px-6 lg:px-8">
+              <div className="flex items-center gap-3">
+                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-600 text-white font-bold shadow">
+                  語
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h1 className="text-lg font-extrabold text-slate-900">Kotoba<span className="text-indigo-600">Sync</span></h1>
+                    <span className="rounded-full bg-amber-50 border border-amber-200 px-2 py-0.5 text-[11px] font-bold text-amber-700">Firebase + PWA</span>
+                  </div>
+                  <p className="text-xs text-slate-500">
+                    {syncStatus === 'firebase-live'
+                      ? `🟢 스마트폰·PC Firebase 실시간 연동 중${userEmail ? ` (${userEmail})` : ''}`
+                      : '🟡 로컬 실시간 동기화 모드 (설정에서 Firebase 연동 가능)'}
+                  </p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <div className="rounded-xl bg-slate-100 px-3 py-1.5 text-xs font-bold text-slate-700">
+                  암기완료 {memorizedCount} / {words.length}
+                </div>
+                <button
+                  onClick={() => setIsSettingsModalOpen(true)}
+                  className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                >
+                  ⚙️ 설정
+                </button>
+              </div>
+            </div>
+          </header>
+
+          {/* 메인 영역 */}
+          <main className="mx-auto w-full max-w-7xl flex-1 space-y-4 px-4 pt-4 sm:px-6 lg:px-8">
+            {/* 1. 상단 메인: 바로 단어장에 추가할 수 있는 빠른 단어 추가 바 */}
+            <div className="rounded-2xl border-2 border-indigo-500/25 bg-gradient-to-br from-indigo-50/70 via-white to-violet-50/50 p-4 shadow-sm sm:p-5">
+              <div className="mb-1.5 flex items-center justify-between">
+                <span className="text-xs sm:text-sm font-extrabold text-indigo-950">✨ 새 일본어 단어 빠른 추가</span>
+                <span className="text-[11px] text-slate-500">발음이나 단어를 입력하면 AI가 후리가나와 다의어·예문을 제안합니다</span>
+              </div>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={addInput}
+                  onChange={e => setAddInput(e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && handleQuickAddSearch()}
+                  placeholder="단어나 발음을 입력해 바로 단어장에 추가하세요 (예: 사쿠라, 벤쿄, 카와이, 하시, 타베루)..."
+                  className="flex-1 rounded-xl border border-indigo-200 bg-white px-4 py-2.5 text-sm font-medium focus:border-indigo-600 focus:outline-none"
+                />
+                <button
+                  onClick={() => handleQuickAddSearch()}
+                  disabled={isSearchingAI || !addInput.trim()}
+                  className="rounded-xl bg-indigo-600 px-5 py-2.5 text-xs sm:text-sm font-bold text-white shadow hover:bg-indigo-700 disabled:opacity-50"
+                >
+                  {isSearchingAI ? '분석 중...' : '+ 단어 추가'}
+                </button>
+              </div>
+              <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                <span className="text-[11px] font-semibold text-slate-500">원터치 추천 예시:</span>
+                {['사쿠라', '벤쿄', '카와이', '하시', '타베루'].map(chip => (
+                  <button
+                    key={chip}
+                    onClick={() => handleQuickAddSearch(chip)}
+                    className="rounded-full bg-white px-2.5 py-0.5 text-xs font-semibold text-indigo-700 border border-indigo-200 hover:bg-indigo-600 hover:text-white transition"
+                  >
+                    + {chip}
+                  </button>
+                ))}
+              </div>
+
+              {/* AI 후보 선택 및 즉시 저장 확장 패널 */}
+              {isAddDrawerOpen && (
+                <div className="mt-4 space-y-3 border-t border-indigo-100 pt-4">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-slate-700">AI 추천 후보를 선택하고 단어장에 바로 저장하세요</span>
+                    <button onClick={() => setIsAddDrawerOpen(false)} className="text-xs text-slate-400 hover:text-slate-700">✕ 닫기</button>
+                  </div>
+                  <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-3">
+                    {candidates.map((cand, idx) => (
+                      <div
+                        key={idx}
+                        onClick={() => selectCandidate(cand, idx)}
+                        className={`cursor-pointer rounded-2xl border p-3.5 transition ${selectedCandIdx === idx ? 'border-indigo-600 bg-white ring-2 ring-indigo-600/20' : 'border-slate-200 bg-white/70'}`}
+                      >
+                        <div className="font-jp text-xl font-extrabold text-slate-900">
+                          {renderJapaneseWithFurigana(cand.kanji, { fallbackKana: cand.kana, hideFurigana })}
+                        </div>
+                        <p className="mt-1 text-[11px] text-slate-500">{cand.nuance}</p>
+                        <div className="mt-2 space-y-1 border-t border-slate-100 pt-2">
+                          {cand.meanings.map((m, mIdx) => (
+                            <div key={mIdx} className="text-xs text-slate-800">
+                              <strong className="text-indigo-600">{mIdx + 1}.</strong> {m.definition} <span className="text-[10px] text-slate-400">({m.partOfSpeech})</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="flex justify-end gap-2">
+                    <button onClick={() => setIsAddDrawerOpen(false)} className="rounded-xl border bg-white px-4 py-2 text-xs font-bold text-slate-600">취소</button>
+                    <button onClick={handleSaveNewWord} className="rounded-xl bg-indigo-600 px-5 py-2 text-xs font-bold text-white shadow">✓ 단어장에 바로 저장</button>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* 2. 학습 툴바 (단어 숨기기 / 뜻 숨기기 / 후리가나 숨기기 + 2단계 상태 필터 + 정렬 + 보조 검색) */}
+            <div className="space-y-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+              <div className="flex flex-col gap-2.5 lg:flex-row lg:items-center lg:justify-between">
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    onClick={() => { setHideWord(!hideWord); setRevealedWordIds(new Set()); }}
+                    className={`rounded-xl border px-3.5 py-2 text-xs font-bold transition ${hideWord ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-slate-700 border-slate-200'}`}
+                  >
+                    {hideWord ? '🙈 단어 숨김 ON' : '👁️ 단어 숨기기'}
+                  </button>
+                  <button
+                    onClick={() => { setHideMeaning(!hideMeaning); setRevealedMeaningIds(new Set()); }}
+                    className={`rounded-xl border px-3.5 py-2 text-xs font-bold transition ${hideMeaning ? 'bg-violet-600 text-white border-violet-600' : 'bg-white text-slate-700 border-slate-200'}`}
+                  >
+                    {hideMeaning ? '🙈 뜻 숨김 ON' : '👁️ 뜻 숨기기'}
+                  </button>
+                  <button
+                    onClick={() => setHideFurigana(!hideFurigana)}
+                    className={`rounded-xl border px-3.5 py-2 text-xs font-bold transition ${hideFurigana ? 'bg-teal-600 text-white border-teal-600' : 'bg-white text-slate-700 border-slate-200'}`}
+                  >
+                    {hideFurigana ? 'あ 후리가나 숨김 ON' : 'あ 후리가나 숨기기'}
+                  </button>
+                </div>
+
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={e => setSearchQuery(e.target.value)}
+                  placeholder="단어장 내 검색 (일본어/뜻)..."
+                  className="w-full lg:w-72 rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-1.5 text-xs focus:border-indigo-500 focus:bg-white focus:outline-none"
+                />
+              </div>
+
+              <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-100 pt-2.5">
+                <div className="flex flex-wrap gap-1.5">
+                  {[
+                    { id: 'all', label: `전체 (${words.length})` },
+                    { id: 'learning', label: '학습중' },
+                    { id: 'memorized', label: `암기완료 (${memorizedCount})` },
+                    { id: 'favorite', label: '⭐ 즐겨찾기' },
+                  ].map(tab => (
+                    <button
+                      key={tab.id}
+                      onClick={() => setStatusFilter(tab.id)}
+                      className={`rounded-lg px-2.5 py-1 text-xs font-semibold ${statusFilter === tab.id ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600'}`}
+                    >
+                      {tab.label}
+                    </button>
+                  ))}
+                </div>
+
+                <div className="flex items-center gap-1.5">
+                  <span className="text-xs font-semibold text-slate-500">정렬:</span>
+                  {[
+                    { id: 'latest', label: '최신순' },
+                    { id: 'kana', label: '오십음도순' },
+                    { id: 'status', label: '암기상태별' },
+                  ].map(opt => (
+                    <button
+                      key={opt.id}
+                      onClick={() => setSortBy(opt.id)}
+                      className={`rounded-lg px-2.5 py-1 text-xs font-bold ${sortBy === opt.id ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-600'}`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {/* 반응형 대시보드:
+                - 모바일/좁은 화면(<1024px): 선택한 단어 바로 아래쪽에 상세 내용이 아코디언 형태로 펼쳐짐
+                - PC 넓은 화면(>=1024px): 좌측 리스트 + 우측 고정 상세/예문/편집 패널 */}
+            <div className="grid grid-cols-1 gap-6 lg:grid-cols-12 lg:items-start">
+              {/* 좌측 단어 카드 리스트 */}
+              <div className="space-y-3 lg:col-span-7">
+                {filteredAndSortedWords.map(word => {
+                  const maskW = hideWord && !revealedWordIds.has(word.id);
+                  const maskM = hideMeaning && !revealedMeaningIds.has(word.id);
+                  const isMemorized = word.memorization_status === 'memorized';
+                  const isSelected = word.id === selectedWordId;
+                  const repExample = word.meanings.find(m => m.examples && m.examples.length > 0)?.examples[0] || null;
+
+                  return (
+                    <div key={word.id} className="space-y-2">
+                      <div
+                        onClick={() => setSelectedWordId(prev => prev === word.id ? null : word.id)}
+                        className={`cursor-pointer rounded-2xl border p-4 transition ${isSelected ? 'border-indigo-600 bg-indigo-50/20 ring-2 ring-indigo-600/15 shadow-sm' : 'border-slate-200 bg-white hover:border-indigo-300'}`}
+                      >
+                        <div className="mb-2.5 flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            {/* 즐겨찾기처럼 단어 리스트에서 바로 상태값을 바꾸는 원터치 버튼 */}
+                            <button
+                              onClick={e => {
+                                e.stopPropagation();
+                                updateWordItem({ ...word, memorization_status: isMemorized ? 'learning' : 'memorized' });
+                              }}
+                              title="클릭하여 학습중 / 암기완료 상태 즉시 변경"
+                              className={`rounded-full border px-3 py-0.5 text-xs font-bold transition active:scale-95 ${
+                                isMemorized
+                                  ? 'border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100'
+                                  : 'border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100'
+                              }`}
+                            >
+                              {isMemorized ? '✅ 암기완료' : '⏳ 학습중'}
+                            </button>
+
+                            {word.meanings.length > 1 && (
+                              <span className="rounded-full bg-indigo-50 px-2 py-0.5 text-[11px] font-bold text-indigo-600">
+                                다의어 {word.meanings.length}개 뜻
+                              </span>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-1" onClick={e => e.stopPropagation()}>
+                            <button onClick={() => speakJapanese(word.kana || word.kanji)} className="rounded-lg p-1.5 text-xs hover:bg-slate-100" title="발음 듣기">🔊</button>
+                            <button onClick={() => updateWordItem({ ...word, is_favorite: !word.is_favorite })} className="rounded-lg p-1.5 text-xs hover:bg-slate-100">
+                              {word.is_favorite ? '⭐' : '☆'}
+                            </button>
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-1 gap-3 sm:grid-cols-12 sm:items-center">
+                          <div className="sm:col-span-5">
+                            {maskW ? (
+                              <button
+                                onClick={e => {
+                                  e.stopPropagation();
+                                  const next = new Set(revealedWordIds);
+                                  next.add(word.id);
+                                  setRevealedWordIds(next);
+                                }}
+                                className="w-full rounded-xl border border-dashed border-indigo-300 bg-indigo-50/60 py-3 text-xs font-bold text-indigo-700"
+                              >
+                                👆 터치하여 일본어 단어 확인
+                              </button>
+                            ) : (
+                              <div className="font-jp text-2xl sm:text-[28px] font-extrabold leading-relaxed text-slate-900">
+                                {renderJapaneseWithFurigana(word.kanji, { fallbackKana: word.kana, hideFurigana })}
+                              </div>
+                            )}
+                          </div>
+
+                          <div className="sm:col-span-7">
+                            {maskM ? (
+                              <button
+                                onClick={e => {
+                                  e.stopPropagation();
+                                  const next = new Set(revealedMeaningIds);
+                                  next.add(word.id);
+                                  setRevealedMeaningIds(next);
+                                }}
+                                className="w-full rounded-xl border border-dashed border-violet-300 bg-violet-50/60 py-3 text-xs font-bold text-violet-700"
+                              >
+                                👆 터치하여 한국어 뜻 확인 ({word.meanings.length}개)
+                              </button>
+                            ) : (
+                              <div className="space-y-1">
+                                {word.meanings.map((m, idx) => (
+                                  <div key={m.id || idx} className="text-sm">
+                                    <span className="mr-1.5 inline-flex h-4 w-4 items-center justify-center rounded-full bg-slate-200 text-[11px] font-bold">{idx + 1}</span>
+                                    <span className="font-bold text-slate-800">{m.definition}</span>
+                                    <span className="ml-1.5 text-xs text-slate-400">[{m.partOfSpeech}]</span>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* 카드 하단: 대표 예문 1개 표시 (한자 위에만 후리가나 루비 표기) */}
+                        {repExample && (
+                          <div className="mt-3 flex items-center justify-between gap-2 rounded-xl bg-slate-50 px-3.5 py-2.5 border border-slate-100">
+                            <div className="space-y-0.5">
+                              {!maskW ? (
+                                <p className="font-jp text-xs sm:text-sm font-bold leading-relaxed text-slate-800">
+                                  💬 {renderJapaneseWithFurigana(repExample.japanese, { hideFurigana })}
+                                </p>
+                              ) : (
+                                <p className="text-xs italic text-slate-400">💬 (단어 숨김 모드)</p>
+                              )}
+                              {!maskM && (
+                                <p className="text-xs text-slate-500 pl-5">{repExample.korean}</p>
+                              )}
+                            </div>
+                            <button
+                              onClick={e => { e.stopPropagation(); speakJapanese(repExample.japanese); }}
+                              className="rounded-lg p-1 text-xs text-slate-400 hover:text-indigo-600"
+                              title="대표 예문 발음 듣기"
+                            >
+                              🔊
+                            </button>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* 모바일/좁은 화면(lg 미만): 선택한 단어 바로 아래쪽에 상세 내용 표시 */}
+                      {isSelected && (
+                        <div className="pl-2 lg:hidden">
+                          {renderDetailCard(word, true)}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* 우측: PC 넓은 화면(lg 이상) 전용 고정 상세 & 다의어 AI 예문 생성·편집 패널 */}
+              {selectedWord && (
+                <div className="hidden lg:block lg:sticky lg:top-20 lg:col-span-5">
+                  {renderDetailCard(selectedWord, false)}
+                </div>
+              )}
+            </div>
+          </main>
+
+          {/* 설정 모달 */}
+          {isSettingsModalOpen && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-sm">
+              <div className="w-full max-w-lg rounded-3xl bg-white p-6 shadow-2xl space-y-4">
+                <div className="flex items-center justify-between border-b pb-3">
+                  <h3 className="text-base font-extrabold text-slate-900">⚙️ Firebase 실시간 연동 & Gemini AI 설정</h3>
+                  <button onClick={() => setIsSettingsModalOpen(false)} className="text-slate-400 hover:text-slate-700">✕</button>
+                </div>
+                <div className="space-y-3">
+                  <div className="rounded-2xl border border-amber-200 bg-amber-50/40 p-3.5 space-y-2.5">
+                    <div className="text-xs font-extrabold text-amber-900">🔥 Google Firebase 연동 (일시정지 없는 실시간 DB)</div>
+                    <div>
+                      <label className="block text-xs font-bold text-slate-700">Firebase Project ID</label>
+                      <input value={config.firebaseProjectId || ''} onChange={e => setConfig({ ...config, firebaseProjectId: e.target.value })} placeholder="예: my-kotobasync" className="mt-1 w-full rounded-xl border bg-white px-3 py-2 text-xs" />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-bold text-slate-700">Firebase Web API Key</label>
+                      <input type="password" value={config.firebaseApiKey || ''} onChange={e => setConfig({ ...config, firebaseApiKey: e.target.value })} placeholder="AIzaSy..." className="mt-1 w-full rounded-xl border bg-white px-3 py-2 text-xs" />
+                    </div>
+                  </div>
+                  <div className="rounded-2xl border border-slate-200 p-3.5 space-y-2">
+                    <label className="block text-xs font-extrabold text-indigo-950">✨ Google Gemini API Key (한자·후리가나·예문 AI 생성)</label>
+                    <input type="password" value={config.geminiApiKey || ''} onChange={e => setConfig({ ...config, geminiApiKey: e.target.value })} placeholder="AIzaSy..." className="w-full rounded-xl border px-3 py-2 text-xs" />
+                  </div>
+                  <div className="rounded-2xl bg-indigo-50/60 border border-indigo-100 p-3 text-xs text-slate-600 space-y-1">
+                    <div className="font-bold text-indigo-950">📱 스마트폰 바탕화면 아이콘(PWA) 추가 안내</div>
+                    <div>• 아이폰(Safari): 하단 [공유] → [홈 화면에 추가]</div>
+                    <div>• 갤럭시(Chrome): 우측 상단 메뉴(⋮) → [홈 화면에 추가]</div>
+                  </div>
+                </div>
+                <div className="flex justify-end gap-2 pt-2">
+                  <button
+                    onClick={() => {
+                      const trimmed = {
+                        firebaseProjectId: (config.firebaseProjectId || '').trim(),
+                        firebaseApiKey: (config.firebaseApiKey || '').trim(),
+                        geminiApiKey: (config.geminiApiKey || '').trim(),
+                      };
+                      setConfig(trimmed);
+                      localStorage.setItem(STORAGE_KEY_CONFIG, JSON.stringify(trimmed));
+                      setIsSettingsModalOpen(false);
+                      if (addInput.trim()) {
+                        setTimeout(() => handleQuickAddSearch(addInput.trim()), 100);
+                      }
+                    }}
+                    className="rounded-xl bg-indigo-600 px-5 py-2 text-xs font-bold text-white"
+                  >
+                    설정 저장
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
