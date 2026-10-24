@@ -9,9 +9,10 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <meta name="apple-mobile-web-app-title" content="KotobaSync" />
-  <link rel="manifest" href="public/manifest.json" />
-  <link rel="icon" href="public/icon.svg" type="image/svg+xml" />
-  <link rel="apple-touch-icon" href="public/icon.svg" />
+  <link rel="manifest" href="./manifest.json" />
+  <link rel="icon" href="./icon-192.png" type="image/png" sizes="192x192" />
+  <link rel="icon" href="./icon-512.png" type="image/png" sizes="512x512" />
+  <link rel="apple-touch-icon" href="./icon-192.png" />
   <!-- Google Fonts: Noto Sans KR & Noto Sans JP -->
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -1384,6 +1385,12 @@
 
     const root = ReactDOM.createRoot(document.getElementById('root'));
     root.render(<App />);
+
+    if ('serviceWorker' in navigator && window.location.protocol.startsWith('http')) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('./sw.js').catch(() => {});
+      });
+    }
   </script>
 </body>
 </html>
