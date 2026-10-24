@@ -498,8 +498,16 @@
       // 설정 모달
       const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
 
-      // 상단 메인 단어 추가 바 상태
+      // 상단 메인 단어 추가 바 상태 및 최근 검색어 상태
       const [addInput, setAddInput] = useState('');
+      const [recentSearches, setRecentSearches] = useState(() => {
+        try {
+          const saved = localStorage.getItem('kotobasync_recent_searches_v1');
+          return saved ? JSON.parse(saved) : [];
+        } catch {
+          return [];
+        }
+      });
       const [isSearchingAI, setIsSearchingAI] = useState(false);
       const [isAddDrawerOpen, setIsAddDrawerOpen] = useState(false);
       const [candidates, setCandidates] = useState([]);
@@ -735,6 +743,16 @@
         const q = (overrideQuery ?? addInput).trim();
         if (!q) return;
         if (overrideQuery) setAddInput(overrideQuery);
+
+        // 최근 검색한 단어 목록 업데이트 (최대 6개 유지)
+        setRecentSearches(prev => {
+          const next = [q, ...prev.filter(item => item !== q)].slice(0, 6);
+          try {
+            localStorage.setItem('kotobasync_recent_searches_v1', JSON.stringify(next));
+          } catch {}
+          return next;
+        });
+
         setIsSearchingAI(true);
         setIsAddDrawerOpen(true);
 
@@ -1004,32 +1022,27 @@
 
       return (
         <div className="min-h-screen flex flex-col pb-16">
-          {/* 상단 헤더 */}
-          <header className="sticky top-0 z-30 border-b border-slate-200 bg-white/90 backdrop-blur-md">
-            <div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-3 sm:px-6 lg:px-8">
-              <div className="flex items-center gap-3">
-                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-600 text-white font-bold shadow">
+          {/* 상단 고정 헤더 (세로 폭을 슬림하게 축소하고 불필요한 배지/문구 제거) */}
+          <header className="sticky top-0 z-30 border-b border-slate-200 bg-white/95 backdrop-blur-md">
+            <div className="mx-auto flex max-w-7xl items-center justify-between px-3.5 py-2 sm:px-6 lg:px-8">
+              <div className="flex items-center gap-2">
+                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-indigo-600 text-sm font-bold text-white shadow-xs">
                   語
                 </div>
-                <div>
-                  <div className="flex items-center gap-2">
-                    <h1 className="text-lg font-extrabold text-slate-900">Kotoba<span className="text-indigo-600">Sync</span></h1>
-                    <span className="rounded-full bg-amber-50 border border-amber-200 px-2 py-0.5 text-[11px] font-bold text-amber-700">Firebase + PWA</span>
-                  </div>
-                  <p className="text-xs text-slate-500">
-                    {syncStatus === 'firebase-live'
-                      ? `🟢 스마트폰·PC Firebase 실시간 연동 중${userEmail ? ` (${userEmail})` : ''}`
-                      : '🟡 로컬 실시간 동기화 모드 (설정에서 Firebase 연동 가능)'}
-                  </p>
-                </div>
+                <h1 className="text-base font-extrabold tracking-tight text-slate-900 sm:text-lg">
+                  Kotoba<span className="text-indigo-600">Sync</span>
+                </h1>
+                {syncStatus === 'firebase-live' && (
+                  <span className="inline-block h-2 w-2 rounded-full bg-emerald-500" title="실시간 연동 중" />
+                )}
               </div>
-              <div className="flex items-center gap-2">
-                <div className="rounded-xl bg-slate-100 px-3 py-1.5 text-xs font-bold text-slate-700">
+              <div className="flex items-center gap-1.5">
+                <div className="whitespace-nowrap rounded-lg bg-slate-100 px-2.5 py-1 text-xs font-bold text-slate-700">
                   암기완료 {memorizedCount} / {words.length}
                 </div>
                 <button
                   onClick={() => setIsSettingsModalOpen(true)}
-                  className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                  className="whitespace-nowrap rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-50"
                 >
                   ⚙️ 설정
                 </button>
@@ -1038,48 +1051,65 @@
           </header>
 
           {/* 메인 영역 */}
-          <main className="mx-auto w-full max-w-7xl flex-1 space-y-4 px-4 pt-4 sm:px-6 lg:px-8">
-            {/* 1. 상단 메인: 바로 단어장에 추가할 수 있는 빠른 단어 추가 바 */}
-            <div className="rounded-2xl border-2 border-indigo-500/25 bg-gradient-to-br from-indigo-50/70 via-white to-violet-50/50 p-4 shadow-sm sm:p-5">
-              <div className="mb-1.5 flex items-center justify-between">
-                <span className="text-xs sm:text-sm font-extrabold text-indigo-950">✨ 새 일본어 단어 빠른 추가</span>
-                <span className="text-[11px] text-slate-500">발음이나 단어를 입력하면 AI가 후리가나와 다의어·예문을 제안합니다</span>
-              </div>
-              <div className="flex gap-2">
+          <main className="mx-auto w-full max-w-7xl flex-1 space-y-3 px-3.5 pt-3 sm:px-6 lg:px-8">
+            {/* 1. 상단 메인: 컴팩트한 빠른 단어 추가 바 (상단 제목 문구 제거, 화면 밖 이탈 방지, 최근 검색 단어 표시) */}
+            <div className="rounded-2xl border border-indigo-500/25 bg-gradient-to-br from-indigo-50/60 via-white to-violet-50/40 p-3 shadow-xs sm:p-4">
+              <div className="flex w-full items-center gap-2">
                 <input
                   type="text"
                   value={addInput}
                   onChange={e => setAddInput(e.target.value)}
                   onKeyDown={e => e.key === 'Enter' && handleQuickAddSearch()}
-                  placeholder="단어나 발음을 입력해 바로 단어장에 추가하세요 (예: 사쿠라, 벤쿄, 카와이, 하시, 타베루)..."
-                  className="flex-1 rounded-xl border border-indigo-200 bg-white px-4 py-2.5 text-sm font-medium focus:border-indigo-600 focus:outline-none"
+                  placeholder="추가할 일본어 단어나 발음 입력..."
+                  className="min-w-0 flex-1 rounded-xl border border-indigo-200 bg-white px-3 py-2 text-sm font-medium focus:border-indigo-600 focus:outline-none"
                 />
                 <button
                   onClick={() => handleQuickAddSearch()}
                   disabled={isSearchingAI || !addInput.trim()}
-                  className="rounded-xl bg-indigo-600 px-5 py-2.5 text-xs sm:text-sm font-bold text-white shadow hover:bg-indigo-700 disabled:opacity-50"
+                  className="shrink-0 whitespace-nowrap rounded-xl bg-indigo-600 px-3.5 py-2 text-xs sm:text-sm font-bold text-white shadow-xs hover:bg-indigo-700 disabled:opacity-50"
                 >
-                  {isSearchingAI ? '분석 중...' : '+ 단어 추가'}
+                  {isSearchingAI ? '분석중' : '+ 단어 추가'}
                 </button>
               </div>
-              <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                <span className="text-[11px] font-semibold text-slate-500">원터치 추천 예시:</span>
-                {['사쿠라', '벤쿄', '카와이', '하시', '타베루'].map(chip => (
-                  <button
-                    key={chip}
-                    onClick={() => handleQuickAddSearch(chip)}
-                    className="rounded-full bg-white px-2.5 py-0.5 text-xs font-semibold text-indigo-700 border border-indigo-200 hover:bg-indigo-600 hover:text-white transition"
-                  >
-                    + {chip}
-                  </button>
-                ))}
-              </div>
+
+              {recentSearches.length > 0 && (
+                <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                  <span className="text-[11px] font-semibold text-slate-400">최근 검색:</span>
+                  {recentSearches.map(term => (
+                    <span
+                      key={term}
+                      className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-2.5 py-0.5 text-xs font-medium text-slate-700"
+                    >
+                      <button
+                        type="button"
+                        onClick={() => handleQuickAddSearch(term)}
+                        className="hover:text-indigo-600"
+                      >
+                        {term}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const next = recentSearches.filter(item => item !== term);
+                          setRecentSearches(next);
+                          try {
+                            localStorage.setItem('kotobasync_recent_searches_v1', JSON.stringify(next));
+                          } catch {}
+                        }}
+                        className="text-[10px] text-slate-400 hover:text-rose-500"
+                      >
+                        ✕
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
 
               {/* AI 후보 선택 및 즉시 저장 확장 패널 */}
               {isAddDrawerOpen && (
-                <div className="mt-4 space-y-3 border-t border-indigo-100 pt-4">
+                <div className="mt-3 space-y-3 border-t border-indigo-100 pt-3">
                   <div className="flex items-center justify-between">
-                    <span className="text-xs font-bold text-slate-700">AI 추천 후보를 선택하고 단어장에 바로 저장하세요</span>
+                    <span className="text-xs font-bold text-slate-700">AI 추천 후보 선택 후 저장</span>
                     <button onClick={() => setIsAddDrawerOpen(false)} className="text-xs text-slate-400 hover:text-slate-700">✕ 닫기</button>
                   </div>
                   <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-3">
@@ -1111,27 +1141,27 @@
               )}
             </div>
 
-            {/* 2. 학습 툴바 (단어 숨기기 / 뜻 숨기기 / 후리가나 숨기기 + 2단계 상태 필터 + 정렬 + 보조 검색) */}
-            <div className="space-y-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+            {/* 2. 학습 툴바 (단어 숨기기 / 뜻 숨기기 / 후리가나 숨기기: 선택해도 무조건 1줄 고정 grid-cols-3) */}
+            <div className="space-y-2.5 rounded-2xl border border-slate-200 bg-white p-3 shadow-xs sm:p-4">
               <div className="flex flex-col gap-2.5 lg:flex-row lg:items-center lg:justify-between">
-                <div className="flex flex-wrap items-center gap-2">
+                <div className="grid grid-cols-3 gap-1.5 w-full lg:w-auto">
                   <button
                     onClick={() => { setHideWord(!hideWord); setRevealedWordIds(new Set()); }}
-                    className={`rounded-xl border px-3.5 py-2 text-xs font-bold transition ${hideWord ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-slate-700 border-slate-200'}`}
+                    className={`whitespace-nowrap rounded-xl border px-2 py-2 text-center text-xs font-bold transition ${hideWord ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-slate-700 border-slate-200'}`}
                   >
-                    {hideWord ? '🙈 단어 숨김 ON' : '👁️ 단어 숨기기'}
+                    {hideWord ? '🙈 단어 숨김' : '👁️ 단어 숨기기'}
                   </button>
                   <button
                     onClick={() => { setHideMeaning(!hideMeaning); setRevealedMeaningIds(new Set()); }}
-                    className={`rounded-xl border px-3.5 py-2 text-xs font-bold transition ${hideMeaning ? 'bg-violet-600 text-white border-violet-600' : 'bg-white text-slate-700 border-slate-200'}`}
+                    className={`whitespace-nowrap rounded-xl border px-2 py-2 text-center text-xs font-bold transition ${hideMeaning ? 'bg-violet-600 text-white border-violet-600' : 'bg-white text-slate-700 border-slate-200'}`}
                   >
-                    {hideMeaning ? '🙈 뜻 숨김 ON' : '👁️ 뜻 숨기기'}
+                    {hideMeaning ? '🙈 뜻 숨김' : '👁️ 뜻 숨기기'}
                   </button>
                   <button
                     onClick={() => setHideFurigana(!hideFurigana)}
-                    className={`rounded-xl border px-3.5 py-2 text-xs font-bold transition ${hideFurigana ? 'bg-teal-600 text-white border-teal-600' : 'bg-white text-slate-700 border-slate-200'}`}
+                    className={`whitespace-nowrap rounded-xl border px-2 py-2 text-center text-xs font-bold transition ${hideFurigana ? 'bg-teal-600 text-white border-teal-600' : 'bg-white text-slate-700 border-slate-200'}`}
                   >
-                    {hideFurigana ? 'あ 후리가나 숨김 ON' : 'あ 후리가나 숨기기'}
+                    {hideFurigana ? 'あ 후리가나 숨김' : 'あ 후리가나 숨기기'}
                   </button>
                 </div>
 
