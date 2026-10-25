@@ -773,26 +773,36 @@
           throw new Error('NO_API_KEY');
         }
 
+        const WORKING_MODEL_KEY = 'kotobasync_working_model_v2';
         if (!window._kotobaDeadModels) {
           window._kotobaDeadModels = new Set(['gemini-2.5-flash-lite', 'gemini-2.0-flash-lite', 'gemini-1.5-flash']);
         }
+        if (!window._kotobaWorkingModel) {
+          try {
+            const savedModel = localStorage.getItem(WORKING_MODEL_KEY);
+            if (savedModel && !window._kotobaDeadModels.has(savedModel)) {
+              window._kotobaWorkingModel = savedModel;
+            }
+          } catch {}
+        }
 
-        // 1. 이미 성공이 확인된 모델이 있으면 최우선 사용
+        // 1. ListModels 네트워크 왕복 시간을 아끼기 위해 가장 빠른 초고속 모델(gemini-3.5-flash-lite)을 즉시 1순위로 배치
         let modelsToTry = [];
         if (window._kotobaWorkingModel && !window._kotobaDeadModels.has(window._kotobaWorkingModel)) {
           modelsToTry.push(window._kotobaWorkingModel);
         }
 
-        if (Array.isArray(window._kotobaCachedModels) && window._kotobaCachedModels.length > 0) {
-          for (const m of window._kotobaCachedModels) {
-            if (!modelsToTry.includes(m) && !window._kotobaDeadModels.has(m)) {
-              modelsToTry.push(m);
-            }
+        for (const fastModel of ['gemini-3.5-flash-lite', 'gemini-flash-lite-latest', 'gemini-3.5-flash', 'gemini-flash-latest']) {
+          if (!modelsToTry.includes(fastModel) && !window._kotobaDeadModels.has(fastModel)) {
+            modelsToTry.push(fastModel);
           }
-        } else {
+        }
+
+        // 만약 기본 모델들이 모두 실패한 적이 있을 때만 ListModels 조회 수행
+        if (modelsToTry.length === 0) {
           try {
             const listCtrl = new AbortController();
-            const listTimer = setTimeout(() => listCtrl.abort(), 5000);
+            const listTimer = setTimeout(() => listCtrl.abort(), 4000);
             const listRes = await fetch(
               `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(cleanKey)}`,
               { signal: listCtrl.signal }
@@ -819,19 +829,15 @@
                 .map((m) => m.name.replace(/^models\//, ''))
                 .filter((name) => !window._kotobaDeadModels.has(name));
 
-              // 최신 버전(3.5 -> 3.0 -> latest -> 2.5) flash 모델을 최우선으로 정렬
+              // 추론(Thinking) 지연이 없는 초고속 lite 계열 3.5 모델을 1순위로 정렬
               const getModelScore = (name) => {
-                if (name === 'gemini-3.5-flash') return 100;
-                if (name === 'gemini-3.5-flash-lite') return 99;
-                if (name.startsWith('gemini-3.5-flash')) return 98;
-                if (name.startsWith('gemini-3-flash') || name.startsWith('gemini-3.0-flash')) return 95;
-                if (name === 'gemini-flash-latest') return 92;
-                if (name === 'gemini-flash-lite-latest') return 90;
-                if (name === 'gemini-2.5-flash') return 85;
-                if (name.includes('3.5') && name.includes('flash')) return 80;
-                if (name.includes('3.') && name.includes('flash')) return 75;
-                if (name.includes('flash')) return 60;
-                if (name.includes('3.5')) return 50;
+                if (name === 'gemini-3.5-flash-lite') return 100;
+                if (name === 'gemini-flash-lite-latest') return 99;
+                if (name === 'gemini-3.5-flash') return 98;
+                if (name.startsWith('gemini-3.5-flash')) return 97;
+                if (name === 'gemini-flash-latest') return 95;
+                if (name.includes('3.5') && name.includes('flash')) return 90;
+                if (name.includes('flash')) return 70;
                 return 10;
               };
 
@@ -847,20 +853,11 @@
                 if (!modelsToTry.includes(m)) modelsToTry.push(m);
               }
             }
-          } catch (listErr) {
-            // ListModels 실패 시 기본 최신 모델 목록 사용
-          }
+          } catch (listErr) {}
         }
 
-        // 기본 최신 모델 폴백 보장
-        for (const fallbackModel of ['gemini-3.5-flash-lite', 'gemini-3.5-flash', 'gemini-flash-latest', 'gemini-2.5-flash']) {
-          if (!modelsToTry.includes(fallbackModel) && !window._kotobaDeadModels.has(fallbackModel)) {
-            modelsToTry.push(fallbackModel);
-          }
-        }
-
-        // 최대 5개 후보 모델까지 빠르게 시도
-        modelsToTry = modelsToTry.slice(0, 5);
+        // 최대 4개 후보 모델까지 빠르게 시도
+        modelsToTry = modelsToTry.slice(0, 4);
 
         let lastErrorMsg = '';
         for (const model of modelsToTry) {
@@ -906,6 +903,9 @@
               if (targetStr) {
                 const parsed = JSON.parse(targetStr);
                 window._kotobaWorkingModel = model;
+                try {
+                  localStorage.setItem(WORKING_MODEL_KEY, model);
+                } catch {}
                 return parsed;
               }
             } else {
@@ -917,6 +917,9 @@
                 window._kotobaDeadModels.add(model);
                 if (window._kotobaWorkingModel === model) {
                   window._kotobaWorkingModel = null;
+                  try {
+                    localStorage.removeItem(WORKING_MODEL_KEY);
+                  } catch {}
                 }
               }
             }
@@ -959,11 +962,12 @@
 
         try {
           if (activeApiKey) {
-            const prompt = `사용자가 일본어 단어장에 단어를 추가하기 위해 "${q}"을(를) 입력했습니다. 이에 대응하는 일본어 단어 후보들을 최대 3개까지 제안해 주세요.
-[매우 중요한 작성 규칙]
-1. 예문의 "japanese" 필드에는 절대 한글(한국어)을 단 한 글자도 섞지 마세요! 100% 자연스러운 일본어(한자, 히라가나, 가타카나) 문장으로만 작성하세요. (예: "전체[ぜんたい]の..." (절대 금지) -> "全体[ぜんたい]の..." (정답))
-2. 후리가나 대괄호 [후리가나]는 오직 한자(Kanji) 바로 뒤에, 그 한자에 해당하는 히라가나 독음만 표기하세요. 조사(の, には, が 등)나 히라가나 어미(오쿠리가나) 뒤에는 절대 대괄호를 붙이지 마세요! (예: "詳しく[くわしく]" (금지) -> "詳[くわ]しく" (정답), "の[の]" (금지) -> "の" (정답))
-3. JSON 배열([{ "kanji": "", "kana": "", "nuance": "", "meanings": [{ "partOfSpeech": "", "definition": "", "examples": [{ "japanese": "全体[ぜんたい]の金額[きんがく]と内訳[うちわけ]を教[おし]えてください。", "korean": "전체 금액과 내역을 알려주세요." }] }] }])로만 응답하세요.`;
+            const prompt = `일본어 단어장 추가 요청: "${q}"
+이에 해당하는 가장 핵심적인 일본어 단어 1개(동음이의어가 뚜렷할 때만 최대 2개)를 제안하세요.
+[규칙]
+1. 예문(japanese)에는 절대 한글을 섞지 말고 100% 일본어로만 간결하게(25자 이내) 작성하세요.
+2. 대괄호 [후리가나]는 오직 한자 바로 뒤에, 그 한자의 히라가나 독음만 표기하세요(조사·히라가나 어미 뒤에는 절대 붙이지 말 것. 예: 詳[くわ]しく).
+3. 각 뜻당 대표 예문 1개씩만 포함하여 JSON 배열([{ "kanji": "", "kana": "", "nuance": "", "meanings": [{ "partOfSpeech": "", "definition": "", "examples": [{ "japanese": "", "korean": "" }] }] }])로만 응답하세요.`;
             const parsed = await callGeminiJSON(activeApiKey, prompt, 0.25);
             if (Array.isArray(parsed) && parsed.length > 0) {
               const sanitized = parsed.map(cand => ({
@@ -1346,7 +1350,7 @@
                   </div>
                   {isSearchingAI ? (
                     <div className="flex items-center justify-center rounded-2xl border border-dashed border-indigo-200 bg-white/80 py-8 text-xs font-semibold text-indigo-600">
-                      ✨ 잠시만 기다려 주세요 (약 1~2초 소요)...
+                      ✨ AI가 단어와 예문을 생성하고 있습니다. 잠시만 기다려 주세요...
                     </div>
                   ) : (
                     <>
