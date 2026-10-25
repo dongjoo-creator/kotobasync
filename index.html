@@ -1,7 +1,8 @@
 <!DOCTYPE html>
-<html lang="ko">
+<html lang="ko" translate="no" class="notranslate">
 <head>
   <meta charset="UTF-8" />
+  <meta name="google" content="notranslate" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <title>KotobaSync | AI 일본어 단어장 (Firebase + PWA)</title>
   <meta name="theme-color" content="#4f46e5" />
@@ -76,9 +77,37 @@
       return text.replace(/\[([^\]]+)\]/g, '');
     }
 
+    // AI가 잘못 생성한 후리가나 포맷(조사 뒤 [조사], 오쿠리가나 뒤 [전체발음], 불필요한 공백 등)을 자동 교정
+    function normalizeJapaneseFurigana(text) {
+      if (!text || typeof text !== 'string') return '';
+      let s = text.trim();
+
+      // 1) 한자+히라가나(오쿠리가나)[전체후리가나] 형태 교정 (예: 詳しく[くわしく] -> 詳[くわ]しく, 書か[か] -> 書か)
+      s = s.replace(/([\u4E00-\u9FAF\u3400-\u4DBF々ヶ]+)([\u3040-\u309F]+)\[([^\]]+)\]/g, (full, kanjiPart, okurigana, reading) => {
+        const cleanReading = reading.trim();
+        if (cleanReading === okurigana) {
+          return kanjiPart + okurigana;
+        }
+        if (cleanReading.endsWith(okurigana) && cleanReading.length > okurigana.length) {
+          const kanjiReading = cleanReading.slice(0, cleanReading.length - okurigana.length);
+          return `${kanjiPart}[${kanjiReading}]${okurigana}`;
+        }
+        return `${kanjiPart}[${cleanReading}]${okurigana}`;
+      });
+
+      // 2) 한자가 아닌 글자(히라가나, 가타카나, 한글, 문장부호, 공백) 바로 뒤에 붙은 잘못된 [후리가나] 제거 (예: の[の], には[には], 。[いる。])
+      s = s.replace(/(^|[^\u4E00-\u9FAF\u3400-\u4DBF々ヶ\]])\[([^\]]+)\]/g, '$1');
+
+      // 3) 한자[후리가나] 앞뒤에 AI가 잘못 넣은 불필요한 반각 공백 제거
+      s = s.replace(/\s+(?=[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FAF\u3400-\u4DBF々ヶ。、！？])/g, '');
+
+      return s;
+    }
+
     // 한자 위에만 작게 후리가나(<ruby>) 렌더링 헬퍼
-    function renderJapaneseWithFurigana(text, { fallbackKana = '', hideFurigana = false } = {}) {
-      if (!text) return null;
+    function renderJapaneseWithFurigana(rawText, { fallbackKana = '', hideFurigana = false } = {}) {
+      if (!rawText) return null;
+      const text = normalizeJapaneseFurigana(rawText);
       const rtClass = hideFurigana
         ? 'invisible opacity-0 transition-opacity duration-150'
         : 'opacity-100 transition-opacity duration-150';
@@ -744,11 +773,20 @@
               )
               .map((m) => m.name.replace(/^models\//, ''));
 
-            // flash 계열 모델을 우선순위로 정렬
+            // 정확도가 높은 정식 flash 모델(gemini-2.5-flash, gemini-2.0-flash, gemini-1.5-flash)을 최우선으로 정렬하고 lite/8b 모델은 후순위로 배치
+            const getModelPriority = (name) => {
+              if (name === 'gemini-2.5-flash') return 1;
+              if (name === 'gemini-2.0-flash') return 2;
+              if (name === 'gemini-1.5-flash') return 3;
+              if (name.includes('flash') && !name.includes('lite') && !name.includes('8b')) return 4;
+              if (name.includes('pro')) return 5;
+              if (name.includes('flash')) return 6;
+              return 7;
+            };
             available.sort((a, b) => {
-              const aFlash = a.includes('flash') ? 0 : 1;
-              const bFlash = b.includes('flash') ? 0 : 1;
-              if (aFlash !== bFlash) return aFlash - bFlash;
+              const pa = getModelPriority(a);
+              const pb = getModelPriority(b);
+              if (pa !== pb) return pa - pb;
               return b.localeCompare(a);
             });
 
@@ -833,11 +871,25 @@
 
         try {
           if (activeApiKey) {
-            const prompt = `사용자가 일본어 단어장에 단어를 추가하기 위해 "${q}"을(를) 입력했습니다. 이에 대응하는 일본어 단어 후보들을 최대 3개까지 제안해 주세요. 예문(japanese)의 모든 한자 뒤에는 반드시 대괄호 [후리가나]를 표기해 한자 위에 루비를 렌더링할 수 있게 하세요(예: 毎日[まいにち]日本語[にほんご]を勉強[べんきょう]します。). JSON 배열([{ "kanji": "", "kana": "", "nuance": "", "meanings": [{ "partOfSpeech": "", "definition": "", "examples": [{ "japanese": "", "korean": "" }] }] }])로만 응답하세요.`;
-            const parsed = await callGeminiJSON(activeApiKey, prompt, 0.3);
+            const prompt = `사용자가 일본어 단어장에 단어를 추가하기 위해 "${q}"을(를) 입력했습니다. 이에 대응하는 일본어 단어 후보들을 최대 3개까지 제안해 주세요.
+[매우 중요한 작성 규칙]
+1. 예문의 "japanese" 필드에는 절대 한글(한국어)을 단 한 글자도 섞지 마세요! 100% 자연스러운 일본어(한자, 히라가나, 가타카나) 문장으로만 작성하세요. (예: "전체[ぜんたい]の..." (절대 금지) -> "全体[ぜんたい]の..." (정답))
+2. 후리가나 대괄호 [후리가나]는 오직 한자(Kanji) 바로 뒤에, 그 한자에 해당하는 히라가나 독음만 표기하세요. 조사(の, には, が 등)나 히라가나 어미(오쿠리가나) 뒤에는 절대 대괄호를 붙이지 마세요! (예: "詳しく[くわしく]" (금지) -> "詳[くわ]しく" (정답), "の[の]" (금지) -> "の" (정답))
+3. JSON 배열([{ "kanji": "", "kana": "", "nuance": "", "meanings": [{ "partOfSpeech": "", "definition": "", "examples": [{ "japanese": "全体[ぜんたい]の金額[きんがく]と内訳[うちわけ]を教[おし]えてください。", "korean": "전체 금액과 내역을 알려주세요." }] }] }])로만 응답하세요.`;
+            const parsed = await callGeminiJSON(activeApiKey, prompt, 0.25);
             if (Array.isArray(parsed) && parsed.length > 0) {
-              setCandidates(parsed);
-              selectCandidate(parsed[0], 0);
+              const sanitized = parsed.map(cand => ({
+                ...cand,
+                meanings: (cand.meanings || []).map(m => ({
+                  ...m,
+                  examples: (m.examples || []).map(ex => ({
+                    ...ex,
+                    japanese: normalizeJapaneseFurigana(ex.japanese || ''),
+                  })),
+                })),
+              }));
+              setCandidates(sanitized);
+              selectCandidate(sanitized[0], 0);
               setIsSearchingAI(false);
               return;
             }
@@ -929,11 +981,34 @@
               activeApiKey = (savedCfg.geminiApiKey || '').trim();
             } catch {}
           }
+          if (!activeApiKey) {
+            activeApiKey = await fetchSecretGeminiKeyFromVault(dbRef.current);
+          }
 
           if (activeApiKey) {
-            const prompt = `일본어 단어 "${selectedWord.kanji}"(독음: "${selectedWord.kana}")의 뜻 중 "${meaning.definition}" 의미로 쓰인 자연스러운 일본어 예문 1개를 생성하세요. 모든 한자 뒤에는 반드시 [후리가나]를 붙여 JSON({"japanese": "毎日[まいにち]...", "korean": ""})으로만 응답하세요.`;
-            const parsed = await callGeminiJSON(activeApiKey, prompt, 0.6);
-            if (parsed && parsed.japanese) generated = parsed;
+            const buildExamplePrompt = (extraWarning = '') => `일본어 단어 "${selectedWord.kanji}"(독음: "${selectedWord.kana}")의 뜻 중 "${meaning.definition}" 의미로 쓰인 자연스러운 일본어 예문 1개를 생성하세요.
+[절대 규칙]
+1. "japanese" 필드에는 절대 한글(한국어)을 단 한 글자도 쓰지 마세요! 반드시 100% 일본어(한자, 히라가나, 가타카나)로만 문장을 작성하세요. (한국어 단어를 섞으면 안 됩니다!)
+2. 대괄호 [후리가나]는 오직 한자(Kanji) 바로 뒤에, 그 한자의 히라가나 발음만 적으세요. 조사(の, には, が, を 등)나 히라가나 어미(오쿠리가나) 뒤에는 절대 대괄호를 붙이지 마세요!
+   - 올바른 예: "請求書[せいきゅうしょ]には、費用[ひよう]の内訳[うちわけ]が詳[くわ]しく書[か]かれている。"
+   - 잘못된 예(절대 금지): "구입[こうにゅう]한..." 또는 "詳しく[くわしく]" 또는 "の[の]"
+3. 띄어쓰기(공백) 없이 자연스러운 일본어 문장으로 작성하고 JSON({"japanese": "", "korean": ""})으로만 응답하세요.${extraWarning}`;
+
+            let parsed = await callGeminiJSON(activeApiKey, buildExamplePrompt(), 0.4);
+            // 만약 AI가 실수로 japanese 필드에 한글을 섞었다면 즉시 1회 재요청하여 순수 일본어 문장으로 교정
+            if (parsed && parsed.japanese && /[가-힣ㄱ-ㅎㅏ-ㅣ]/.test(parsed.japanese)) {
+              parsed = await callGeminiJSON(
+                activeApiKey,
+                buildExamplePrompt(`\n⚠️ 방금 응답("${parsed.japanese}")에 한글이 섞여 있었습니다! 한글을 전부 일본어 한자/히라가나로 번역하여 100% 일본어 문장으로만 다시 작성하세요.`),
+                0.2
+              );
+            }
+            if (parsed && parsed.japanese) {
+              generated = {
+                japanese: normalizeJapaneseFurigana(parsed.japanese),
+                korean: parsed.korean || generated.korean,
+              };
+            }
           }
 
           const newEx = { id: `ex-${Date.now()}`, ...generated };
