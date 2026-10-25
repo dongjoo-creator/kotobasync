@@ -773,15 +773,21 @@
           throw new Error('NO_API_KEY');
         }
 
-        // 1. 전역 캐시를 활용해 모델 목록 조회는 최초 1회만 수행
+        if (!window._kotobaDeadModels) {
+          window._kotobaDeadModels = new Set(['gemini-2.5-flash-lite', 'gemini-2.0-flash-lite', 'gemini-1.5-flash']);
+        }
+
+        // 1. 이미 성공이 확인된 모델이 있으면 최우선 사용
         let modelsToTry = [];
-        if (window._kotobaWorkingModel) {
+        if (window._kotobaWorkingModel && !window._kotobaDeadModels.has(window._kotobaWorkingModel)) {
           modelsToTry.push(window._kotobaWorkingModel);
         }
 
         if (Array.isArray(window._kotobaCachedModels) && window._kotobaCachedModels.length > 0) {
           for (const m of window._kotobaCachedModels) {
-            if (!modelsToTry.includes(m)) modelsToTry.push(m);
+            if (!modelsToTry.includes(m) && !window._kotobaDeadModels.has(m)) {
+              modelsToTry.push(m);
+            }
           }
         } else {
           try {
@@ -807,44 +813,54 @@
                     !m.name.includes('tts') &&
                     !m.name.includes('audio') &&
                     !m.name.includes('thinking') &&
-                    !m.name.includes('exp')
+                    !m.name.includes('robotics') &&
+                    !m.name.includes('computer-use')
                 )
-                .map((m) => m.name.replace(/^models\//, ''));
+                .map((m) => m.name.replace(/^models\//, ''))
+                .filter((name) => !window._kotobaDeadModels.has(name));
 
-              // 응답 속도가 빠르고(1~2초) 정확한 gemini-2.0-flash / gemini-1.5-flash 모델을 최우선으로 배치
-              const getModelPriority = (name) => {
-                if (name === 'gemini-2.0-flash') return 1;
-                if (name === 'gemini-1.5-flash') return 2;
-                if (name === 'gemini-2.0-flash-001') return 3;
-                if (name === 'gemini-2.5-flash') return 4;
-                if (name === 'gemini-2.0-flash-lite') return 5;
-                if (name.includes('flash') && !name.includes('preview')) return 6;
-                if (name.includes('flash')) return 7;
-                return 8;
+              // 최신 버전(3.5 -> 3.0 -> latest -> 2.5) flash 모델을 최우선으로 정렬
+              const getModelScore = (name) => {
+                if (name === 'gemini-3.5-flash') return 100;
+                if (name === 'gemini-3.5-flash-lite') return 99;
+                if (name.startsWith('gemini-3.5-flash')) return 98;
+                if (name.startsWith('gemini-3-flash') || name.startsWith('gemini-3.0-flash')) return 95;
+                if (name === 'gemini-flash-latest') return 92;
+                if (name === 'gemini-flash-lite-latest') return 90;
+                if (name === 'gemini-2.5-flash') return 85;
+                if (name.includes('3.5') && name.includes('flash')) return 80;
+                if (name.includes('3.') && name.includes('flash')) return 75;
+                if (name.includes('flash')) return 60;
+                if (name.includes('3.5')) return 50;
+                return 10;
               };
+
               available.sort((a, b) => {
-                const pa = getModelPriority(a);
-                const pb = getModelPriority(b);
-                if (pa !== pb) return pa - pb;
-                return a.localeCompare(b);
+                const sa = getModelScore(a);
+                const sb = getModelScore(b);
+                if (sa !== sb) return sb - sa;
+                return b.localeCompare(a);
               });
 
-              window._kotobaCachedModels = available.slice(0, 4);
-              for (const m of window._kotobaCachedModels) {
+              window._kotobaCachedModels = available;
+              for (const m of available) {
                 if (!modelsToTry.includes(m)) modelsToTry.push(m);
               }
             }
           } catch (listErr) {
-            // ListModels 실패 시 기본 고속 모델 사용
+            // ListModels 실패 시 기본 최신 모델 목록 사용
           }
         }
 
-        if (modelsToTry.length === 0) {
-          modelsToTry = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-2.5-flash'];
-        } else {
-          // 무한 대기 방지를 위해 최대 3개 모델까지만 시도
-          modelsToTry = modelsToTry.slice(0, 3);
+        // 기본 최신 모델 폴백 보장
+        for (const fallbackModel of ['gemini-3.5-flash-lite', 'gemini-3.5-flash', 'gemini-flash-latest', 'gemini-2.5-flash']) {
+          if (!modelsToTry.includes(fallbackModel) && !window._kotobaDeadModels.has(fallbackModel)) {
+            modelsToTry.push(fallbackModel);
+          }
         }
+
+        // 최대 5개 후보 모델까지 빠르게 시도
+        modelsToTry = modelsToTry.slice(0, 5);
 
         let lastErrorMsg = '';
         for (const model of modelsToTry) {
@@ -852,19 +868,13 @@
           const reqTimer = setTimeout(() => reqCtrl.abort(), 12000);
           try {
             const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(cleanKey)}`;
-            const genConfig = { temperature };
-            // gemini-2.5 계열의 추론(Thinking) 지연 시간 비활성화하여 즉시 응답 유도
-            if (model.includes('2.5')) {
-              genConfig.thinkingConfig = { thinkingBudget: 0 };
-            }
-
             const res = await fetch(url, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               signal: reqCtrl.signal,
               body: JSON.stringify({
                 contents: [{ parts: [{ text: prompt }] }],
-                generationConfig: genConfig,
+                generationConfig: { temperature },
               }),
             });
             clearTimeout(reqTimer);
@@ -900,7 +910,15 @@
               }
             } else {
               const errJson = await res.json().catch(() => ({}));
-              lastErrorMsg = errJson?.error?.message || `HTTP ${res.status}`;
+              const msg = errJson?.error?.message || `HTTP ${res.status}`;
+              lastErrorMsg = msg;
+              // 신규 사용자에게 중단된 구형 모델이거나 404/400인 경우 즉시 제외 목록에 등록하고 다음 최신 모델로 진행
+              if (res.status === 404 || res.status === 400 || msg.includes('no longer available') || msg.includes('not found')) {
+                window._kotobaDeadModels.add(model);
+                if (window._kotobaWorkingModel === model) {
+                  window._kotobaWorkingModel = null;
+                }
+              }
             }
           } catch (err) {
             clearTimeout(reqTimer);
