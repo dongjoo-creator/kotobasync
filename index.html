@@ -568,6 +568,18 @@
       const authRef = useRef(null);
       const userUidRef = useRef(null);
 
+      // 드래그 앤 드롭(마우스 & 모바일 롱프레스) 순서 변경 상태
+      const [draggingWordId, setDraggingWordId] = useState(null);
+      const draggedIdRef = useRef(null);
+      const touchDragIdRef = useRef(null);
+      const longPressTimerRef = useRef(null);
+      const touchStartPosRef = useRef({ x: 0, y: 0 });
+      const suppressNextClickRef = useRef(false);
+      const wordsRef = useRef(words);
+      useEffect(() => {
+        wordsRef.current = words;
+      }, [words]);
+
       const getCollectionPath = () => {
         return 'kotobasync_words';
       };
@@ -731,7 +743,14 @@
         const statusOrder = { learning: 0, memorized: 1 };
 
         return [...filtered].sort((a, b) => {
-          if (sortBy === 'latest') return new Date(b.created_at) - new Date(a.created_at);
+          if (sortBy === 'latest') {
+            const ao = typeof a.sort_order === 'number' ? a.sort_order : null;
+            const bo = typeof b.sort_order === 'number' ? b.sort_order : null;
+            if (ao !== null && bo !== null && ao !== bo) return ao - bo;
+            if (ao !== null && bo === null) return -1;
+            if (ao === null && bo !== null) return 1;
+            return new Date(b.created_at) - new Date(a.created_at);
+          }
           if (sortBy === 'kana') return collator.compare(a.kana || a.kanji, b.kana || b.kanji);
           if (sortBy === 'status') return statusOrder[a.memorization_status] - statusOrder[b.memorization_status];
           return 0;
@@ -766,6 +785,112 @@
         }
       };
 
+      // 단어 카드 순서 이동 함수 (마우스 드래그 & 모바일 롱프레스 공용)
+      const moveWordInList = (fromId, toId) => {
+        if (!fromId || !toId || fromId === toId) return;
+        if (sortBy !== 'latest') {
+          setSortBy('latest');
+        }
+        setWords(prev => {
+          const ordered = [...prev].sort((a, b) => {
+            const ao = typeof a.sort_order === 'number' ? a.sort_order : null;
+            const bo = typeof b.sort_order === 'number' ? b.sort_order : null;
+            if (ao !== null && bo !== null && ao !== bo) return ao - bo;
+            if (ao !== null && bo === null) return -1;
+            if (ao === null && bo !== null) return 1;
+            return new Date(b.created_at) - new Date(a.created_at);
+          });
+          const fromIdx = ordered.findIndex(w => w.id === fromId);
+          const toIdx = ordered.findIndex(w => w.id === toId);
+          if (fromIdx === -1 || toIdx === -1 || fromIdx === toIdx) return prev;
+
+          const [moved] = ordered.splice(fromIdx, 1);
+          ordered.splice(toIdx, 0, moved);
+          return ordered.map((w, idx) => ({ ...w, sort_order: idx }));
+        });
+      };
+
+      // 순서 변경 완료 시 클라우드(Firestore)에 일괄 반영
+      const commitReorderedWordsToCloud = () => {
+        const currentList = wordsRef.current;
+        try {
+          localStorage.setItem(STORAGE_KEY_WORDS, JSON.stringify(currentList));
+        } catch {}
+        if (dbRef.current && Array.isArray(currentList)) {
+          try {
+            const batch = dbRef.current.batch();
+            const colRef = dbRef.current.collection(getCollectionPath());
+            currentList.forEach((w, idx) => {
+              const orderVal = typeof w.sort_order === 'number' ? w.sort_order : idx;
+              batch.set(colRef.doc(w.id), { sort_order: orderVal }, { merge: true });
+            });
+            batch.commit().catch(() => {});
+          } catch {}
+        }
+      };
+
+      // 모바일 롱프레스(길게 누르기) 드래그 이벤트 처리
+      useEffect(() => {
+        const handleGlobalTouchMove = (e) => {
+          if (!touchDragIdRef.current) {
+            if (longPressTimerRef.current && e.touches && e.touches[0]) {
+              const dx = Math.abs(e.touches[0].clientX - touchStartPosRef.current.x);
+              const dy = Math.abs(e.touches[0].clientY - touchStartPosRef.current.y);
+              if (dx > 10 || dy > 10) {
+                clearTimeout(longPressTimerRef.current);
+                longPressTimerRef.current = null;
+              }
+            }
+            return;
+          }
+
+          // 롱프레스 드래그 중에는 화면 스크롤을 막고 카드 위치 이동
+          if (e.cancelable) e.preventDefault();
+          const touch = e.touches && e.touches[0];
+          if (!touch) return;
+
+          // 화면 상하단 가장자리 근처에서 자동 스크롤 지원
+          if (touch.clientY < 95) {
+            window.scrollBy(0, -10);
+          } else if (touch.clientY > window.innerHeight - 95) {
+            window.scrollBy(0, 10);
+          }
+
+          const el = document.elementFromPoint(touch.clientX, touch.clientY);
+          const cardEl = el && el.closest ? el.closest('[data-word-id]') : null;
+          if (cardEl) {
+            const targetId = cardEl.getAttribute('data-word-id');
+            if (targetId && targetId !== touchDragIdRef.current) {
+              moveWordInList(touchDragIdRef.current, targetId);
+            }
+          }
+        };
+
+        const handleGlobalTouchEnd = () => {
+          if (longPressTimerRef.current) {
+            clearTimeout(longPressTimerRef.current);
+            longPressTimerRef.current = null;
+          }
+          if (touchDragIdRef.current) {
+            touchDragIdRef.current = null;
+            setDraggingWordId(null);
+            commitReorderedWordsToCloud();
+            setTimeout(() => {
+              suppressNextClickRef.current = false;
+            }, 80);
+          }
+        };
+
+        window.addEventListener('touchmove', handleGlobalTouchMove, { passive: false });
+        window.addEventListener('touchend', handleGlobalTouchEnd);
+        window.addEventListener('touchcancel', handleGlobalTouchEnd);
+        return () => {
+          window.removeEventListener('touchmove', handleGlobalTouchMove);
+          window.removeEventListener('touchend', handleGlobalTouchEnd);
+          window.removeEventListener('touchcancel', handleGlobalTouchEnd);
+        };
+      }, [sortBy]);
+
       // Gemini API 사용 가능 모델 자동 탐색(ListModels) 및 초고속 호출 헬퍼
       async function callGeminiJSON(apiKey, prompt, temperature = 0.3) {
         const cleanKey = (apiKey || '').trim();
@@ -773,7 +898,7 @@
           throw new Error('NO_API_KEY');
         }
 
-        const WORKING_MODEL_KEY = 'kotobasync_working_model_v2';
+        const WORKING_MODEL_KEY = 'kotobasync_working_model_v3';
         if (!window._kotobaDeadModels) {
           window._kotobaDeadModels = new Set(['gemini-2.5-flash-lite', 'gemini-2.0-flash-lite', 'gemini-1.5-flash']);
         }
@@ -786,15 +911,15 @@
           } catch {}
         }
 
-        // 1. ListModels 네트워크 왕복 시간을 아끼기 위해 가장 빠른 초고속 모델(gemini-3.5-flash-lite)을 즉시 1순위로 배치
+        // 1. 사전적 뜻의 정확도가 가장 높은 정식 Flash 모델(gemini-3.5-flash, gemini-flash-latest)을 최우선으로 배치
         let modelsToTry = [];
         if (window._kotobaWorkingModel && !window._kotobaDeadModels.has(window._kotobaWorkingModel)) {
           modelsToTry.push(window._kotobaWorkingModel);
         }
 
-        for (const fastModel of ['gemini-3.5-flash-lite', 'gemini-flash-lite-latest', 'gemini-3.5-flash', 'gemini-flash-latest']) {
-          if (!modelsToTry.includes(fastModel) && !window._kotobaDeadModels.has(fastModel)) {
-            modelsToTry.push(fastModel);
+        for (const accurateModel of ['gemini-3.5-flash', 'gemini-flash-latest', 'gemini-2.5-flash', 'gemini-3.5-flash-lite', 'gemini-flash-lite-latest']) {
+          if (!modelsToTry.includes(accurateModel) && !window._kotobaDeadModels.has(accurateModel)) {
+            modelsToTry.push(accurateModel);
           }
         }
 
@@ -829,13 +954,14 @@
                 .map((m) => m.name.replace(/^models\//, ''))
                 .filter((name) => !window._kotobaDeadModels.has(name));
 
-              // 추론(Thinking) 지연이 없는 초고속 lite 계열 3.5 모델을 1순위로 정렬
+              // 정확도가 높은 정식 3.5 Flash 모델을 1순위로 정렬
               const getModelScore = (name) => {
-                if (name === 'gemini-3.5-flash-lite') return 100;
-                if (name === 'gemini-flash-lite-latest') return 99;
-                if (name === 'gemini-3.5-flash') return 98;
-                if (name.startsWith('gemini-3.5-flash')) return 97;
-                if (name === 'gemini-flash-latest') return 95;
+                if (name === 'gemini-3.5-flash') return 100;
+                if (name === 'gemini-flash-latest') return 99;
+                if (name.startsWith('gemini-3.5-flash') && !name.includes('lite')) return 98;
+                if (name === 'gemini-2.5-flash') return 96;
+                if (name === 'gemini-3.5-flash-lite') return 94;
+                if (name === 'gemini-flash-lite-latest') return 92;
                 if (name.includes('3.5') && name.includes('flash')) return 90;
                 if (name.includes('flash')) return 70;
                 return 10;
@@ -962,12 +1088,13 @@
 
         try {
           if (activeApiKey) {
-            const prompt = `일본어 단어장 추가 요청: "${q}"
-이에 해당하는 가장 핵심적인 일본어 단어 1개(동음이의어가 뚜렷할 때만 최대 2개)를 제안하세요.
-[규칙]
-1. 예문(japanese)에는 절대 한글을 섞지 말고 100% 일본어로만 간결하게(25자 이내) 작성하세요.
-2. 대괄호 [후리가나]는 오직 한자 바로 뒤에, 그 한자의 히라가나 독음만 표기하세요(조사·히라가나 어미 뒤에는 절대 붙이지 말 것. 예: 詳[くわ]しく).
-3. 각 뜻당 대표 예문 1개씩만 포함하여 JSON 배열([{ "kanji": "", "kana": "", "nuance": "", "meanings": [{ "partOfSpeech": "", "definition": "", "examples": [{ "japanese": "", "korean": "" }] }] }])로만 응답하세요.`;
+            const prompt = `사용자가 일본어 단어장에 단어를 추가하기 위해 "${q}"을(를) 입력했습니다. 이에 대응하는 일본어 단어 후보들을 최대 3개까지 전문 일본어 사전 수준으로 정확하게 제안해 주세요.
+[매우 중요한 사전 작성 규칙]
+1. 한국어 뜻("definition")은 절대 일본어 발음을 한글로 소리 나는 대로 적지 마세요! (예: 天下り의 뜻을 "아마쿠다리"라고 적으면 절대 안 되며, "낙하산 인사 (중앙부처의 퇴직 관리가 공기업이나 민간 기업의 임원으로 재취업하는 일)", "신이나 천상계의 존재가 지상으로 내려옴"처럼 정확한 한국어 사전적 의미와 보충 설명을 적어주세요!)
+2. 다의어인 경우 주요 뜻들을 각각 분리하여 meanings 배열에 순서대로 담아주세요.
+3. 예문의 "japanese" 필드에는 절대 한글(한국어)을 단 한 글자도 섞지 마세요! 100% 자연스러운 일본어(한자, 히라가나, 가타카나) 문장으로만 작성하세요.
+4. 후리가나 대괄호 [후리가나]는 오직 한자(Kanji) 바로 뒤에, 그 한자에 해당하는 히라가나 독음만 표기하세요. 조사(の, には, が 등)나 히라가나 어미(오쿠리가나) 뒤에는 절대 대괄호를 붙이지 마세요! (예: "詳しく[くわしく]" (금지) -> "詳[くわ]しく" (정답))
+5. JSON 배열([{ "kanji": "天下り", "kana": "あまくだり", "nuance": "관료의 낙하산 인사 및 본래 의미", "meanings": [{ "partOfSpeech": "명사 · する동사", "definition": "낙하산 인사 (중앙부처의 퇴직 관리가 공기업이나 민간 기업의 임원으로 재취업하는 일)", "examples": [{ "japanese": "官僚[かんりょう]の天下[あまくだ]り問題[もんだい]が厳[きび]しく批判[ひはん]されている。", "korean": "관료의 낙하산 인사 문제가 엄하게 비판받고 있다." }] }] }])로만 응답하세요.`;
             const parsed = await callGeminiJSON(activeApiKey, prompt, 0.25);
             if (Array.isArray(parsed) && parsed.length > 0) {
               const sanitized = parsed.map(cand => ({
@@ -1027,6 +1154,7 @@
         if (e) e.preventDefault();
         if (!newKanji.trim()) return;
         const nowIso = new Date().toISOString();
+        const minOrder = words.reduce((min, w) => (typeof w.sort_order === 'number' ? Math.min(min, w.sort_order) : min), 0);
         const item = {
           id: `word-${Date.now()}`,
           kanji: newKanji.trim(),
@@ -1034,10 +1162,11 @@
           meanings: newMeanings.filter(m => m.definition.trim()),
           memorization_status: 'learning',
           is_favorite: false,
+          sort_order: minOrder - 1,
           created_at: nowIso,
           updated_at: nowIso,
         };
-        // 새로 추가한 단어가 항상 가장 위에 표시되도록 최신순('latest')으로 전환 후 맨 앞에 추가
+        // 새로 추가한 단어가 항상 가장 위에 표시되도록 기본 순서('latest')로 전환 후 맨 앞에 추가
         setSortBy('latest');
         if (statusFilter === 'memorized' || statusFilter === 'favorite') {
           setStatusFilter('all');
@@ -1045,7 +1174,7 @@
         setWords(prev => [item, ...prev]);
         setSelectedWordId(item.id);
         if (dbRef.current) {
-          await dbRef.current.collection(getCollectionPath()).doc(item.id).set(item).catch(() => {});
+          dbRef.current.collection(getCollectionPath()).doc(item.id).set(item).catch(() => {});
         }
         setIsAddDrawerOpen(false);
         setAddInput('');
@@ -1350,7 +1479,7 @@
                   </div>
                   {isSearchingAI ? (
                     <div className="flex items-center justify-center rounded-2xl border border-dashed border-indigo-200 bg-white/80 py-8 text-xs font-semibold text-indigo-600">
-                      ✨ AI가 단어와 예문을 생성하고 있습니다. 잠시만 기다려 주세요...
+                      ✨ AI가 정확한 사전적 뜻과 일본어 예문을 분석하고 있습니다 (약 5~6초 소요)...
                     </div>
                   ) : (
                     <>
@@ -1466,16 +1595,68 @@
                   const maskM = hideMeaning && !revealedMeaningIds.has(word.id);
                   const isMemorized = word.memorization_status === 'memorized';
                   const isSelected = word.id === selectedWordId;
+                  const isDragging = draggingWordId === word.id;
                   const repExample = word.meanings.find(m => m.examples && m.examples.length > 0)?.examples[0] || null;
 
                   return (
-                    <div key={word.id} className="space-y-2">
+                    <div key={word.id} data-word-id={word.id} className="space-y-2">
                       <div
-                        onClick={() => setSelectedWordId(prev => prev === word.id ? null : word.id)}
-                        className={`cursor-pointer rounded-2xl border p-4 transition ${isSelected ? 'border-indigo-600 bg-indigo-50/20 ring-2 ring-indigo-600/15 shadow-sm' : 'border-slate-200 bg-white hover:border-indigo-300'}`}
+                        draggable={!isEditingHeader}
+                        onDragStart={e => {
+                          draggedIdRef.current = word.id;
+                          setDraggingWordId(word.id);
+                          if (e.dataTransfer) {
+                            e.dataTransfer.effectAllowed = 'move';
+                          }
+                        }}
+                        onDragOver={e => {
+                          e.preventDefault();
+                          if (draggedIdRef.current && draggedIdRef.current !== word.id) {
+                            moveWordInList(draggedIdRef.current, word.id);
+                          }
+                        }}
+                        onDragEnd={() => {
+                          draggedIdRef.current = null;
+                          setDraggingWordId(null);
+                          commitReorderedWordsToCloud();
+                        }}
+                        onTouchStart={e => {
+                          const touch = e.touches && e.touches[0];
+                          if (!touch) return;
+                          touchStartPosRef.current = { x: touch.clientX, y: touch.clientY };
+                          if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
+                          longPressTimerRef.current = setTimeout(() => {
+                            touchDragIdRef.current = word.id;
+                            suppressNextClickRef.current = true;
+                            setDraggingWordId(word.id);
+                            if (navigator.vibrate) {
+                              try { navigator.vibrate(35); } catch {}
+                            }
+                          }, 350);
+                        }}
+                        onClick={() => {
+                          if (suppressNextClickRef.current) {
+                            suppressNextClickRef.current = false;
+                            return;
+                          }
+                          setSelectedWordId(prev => prev === word.id ? null : word.id);
+                        }}
+                        className={`cursor-pointer select-none rounded-2xl border p-4 transition duration-150 ${
+                          isDragging
+                            ? 'scale-[1.02] border-indigo-600 bg-indigo-50/90 ring-2 ring-indigo-600 shadow-xl z-20'
+                            : isSelected
+                            ? 'border-indigo-600 bg-indigo-50/20 ring-2 ring-indigo-600/15 shadow-sm'
+                            : 'border-slate-200 bg-white hover:border-indigo-300'
+                        }`}
                       >
                         <div className="mb-2.5 flex items-center justify-between">
                           <div className="flex items-center gap-2">
+                            <span
+                              title="드래그(PC) 또는 길게 눌러(모바일) 순서 변경"
+                              className="cursor-grab active:cursor-grabbing px-1 text-sm text-slate-300 hover:text-indigo-500 select-none"
+                            >
+                              ⠿
+                            </span>
                             {/* 즐겨찾기처럼 단어 리스트에서 바로 상태값을 바꾸는 원터치 버튼 */}
                             <button
                               onClick={e => {
@@ -1495,6 +1676,11 @@
                             {word.meanings.length > 1 && (
                               <span className="rounded-full bg-indigo-50 px-2 py-0.5 text-[11px] font-bold text-indigo-600">
                                 다의어 {word.meanings.length}개 뜻
+                              </span>
+                            )}
+                            {isDragging && (
+                              <span className="rounded-full bg-indigo-600 px-2 py-0.5 text-[11px] font-bold text-white">
+                                ↕ 이동 중
                               </span>
                             )}
                           </div>
