@@ -833,16 +833,23 @@
           throw new Error('NO_API_KEY');
         }
 
-        const WORKING_MODEL_KEY = 'kotobasync_working_model_v4';
+        const WORKING_MODEL_KEY = 'kotobasync_working_model_v5';
         if (!window._kotobaDeadModels) {
           window._kotobaDeadModels = new Set([
             'gemini-2.5-flash',
+            'gemini-2.5-pro',
             'gemini-2.5-flash-lite',
             'gemini-2.0-flash',
             'gemini-2.0-flash-001',
             'gemini-2.0-flash-lite',
             'gemini-1.5-flash',
             'gemini-1.5-pro',
+            'gemini-3.0-flash',
+            'gemini-3.0-flash-lite',
+            'gemini-3.7-flash',
+            'gemini-3.8-flash',
+            'gemini-4-argon',
+            'gemini-pro-latest',
           ]);
         }
         if (!window._kotobaCooldownUntil) {
@@ -895,19 +902,18 @@
                 .map((m) => m.name.replace(/^models\//, ''))
                 .filter((name) => !window._kotobaDeadModels.has(name));
 
-              // 정확도 높은 최신 3.x Flash -> Flash-Latest -> 3.5 Flash-Lite -> Pro -> Gemma-3 순으로 정렬
+              // 실제 호출 테스트에서 즉시 응답(OK)이 검증된 3.1 / 3.0 / 3.6 모델을 최우선으로 정렬
               const getModelScore = (name) => {
-                if (name === 'gemini-3.0-flash' || name === 'gemini-3-flash') return 100;
-                if (name === 'gemini-3.5-flash') return 99;
-                if (name === 'gemini-flash-latest') return 98;
-                if (name.startsWith('gemini-3') && name.includes('flash') && !name.includes('lite')) return 96;
-                if (name === 'gemini-3.5-flash-lite') return 94;
-                if (name === 'gemini-3.0-flash-lite' || name === 'gemini-3-flash-lite') return 93;
-                if (name === 'gemini-flash-lite-latest') return 92;
-                if (name.startsWith('gemini-3') && name.includes('flash')) return 90;
-                if (name.includes('flash')) return 80;
-                if (name.includes('pro')) return 70;
-                if (name.includes('gemma-3-27b')) return 60;
+                if (name === 'gemini-3.1-flash-lite') return 100;
+                if (name === 'gemini-3.1-flash-lite-preview') return 99;
+                if (name === 'gemini-3-flash-preview') return 98;
+                if (name === 'gemini-3.6-flash') return 97;
+                if (name === 'gemini-flash-lite-latest') return 95;
+                if (name === 'gemini-3.5-flash') return 92;
+                if (name === 'gemini-3.5-flash-lite') return 90;
+                if (name.includes('3.1') && name.includes('flash')) return 88;
+                if (name.includes('3.6') && name.includes('flash')) return 86;
+                if (name.includes('flash')) return 70;
                 return 10;
               };
 
@@ -940,12 +946,15 @@
         if (window._kotobaWorkingModel) {
           pushCandidate(window._kotobaWorkingModel);
         }
+        // 실제 API 키 진단에서 [OK] 확인된 무료 할당량 활성 모델들을 최우선 배치
         for (const preset of [
-          'gemini-3.0-flash',
-          'gemini-flash-latest',
-          'gemini-3.5-flash-lite',
+          'gemini-3.1-flash-lite',
+          'gemini-3.1-flash-lite-preview',
+          'gemini-3-flash-preview',
+          'gemini-3.6-flash',
           'gemini-flash-lite-latest',
-          'gemini-3.0-flash-lite',
+          'gemini-3.5-flash',
+          'gemini-3.5-flash-lite',
         ]) {
           pushCandidate(preset);
         }
@@ -963,7 +972,7 @@
         for (let i = 0; i < modelsToTry.length; i++) {
           const model = modelsToTry[i];
           const reqCtrl = new AbortController();
-          const reqTimer = setTimeout(() => reqCtrl.abort(), 12000);
+          const reqTimer = setTimeout(() => reqCtrl.abort(), 8500);
           try {
             const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(cleanKey)}`;
             const res = await fetch(url, {
@@ -972,7 +981,10 @@
               signal: reqCtrl.signal,
               body: JSON.stringify({
                 contents: [{ parts: [{ text: prompt }] }],
-                generationConfig: { temperature },
+                generationConfig: {
+                  temperature,
+                  responseMimeType: 'application/json',
+                },
               }),
             });
             clearTimeout(reqTimer);
