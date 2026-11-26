@@ -528,11 +528,13 @@
       const [searchQuery, setSearchQuery] = useState('');
       const [sortBy, setSortBy] = useState('latest'); // 'latest' | 'kana' | 'status'
       const [statusFilter, setStatusFilter] = useState('all'); // 'all' | 'learning' | 'memorized' | 'favorite'
+      const [posFilter, setPosFilter] = useState('all'); // 'all' | 'noun' | 'verb' | 'adj' | 'adv_etc'
       const [hideWord, setHideWord] = useState(false);
       const [hideMeaning, setHideMeaning] = useState(false);
       const [hideFurigana, setHideFurigana] = useState(false);
       const [revealedWordIds, setRevealedWordIds] = useState(new Set());
       const [revealedMeaningIds, setRevealedMeaningIds] = useState(new Set());
+      const [revealedFuriganaIds, setRevealedFuriganaIds] = useState(new Set());
 
       // 설정 모달
       const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
@@ -723,11 +725,56 @@
         }
       }, [config.firebaseProjectId, config.firebaseApiKey]);
 
+      // 품사 카테고리 판별 헬퍼 (명사 / 동사 / 형용사 / 부사·관용구·기타)
+      const isNounPos = (posStr) => {
+        const p = (posStr || '').toLowerCase();
+        return p.includes('명사');
+      };
+      const isAdjPos = (posStr) => {
+        const p = (posStr || '').toLowerCase();
+        return p.includes('형용') || p.includes('연체');
+      };
+      const isVerbPos = (posStr) => {
+        const p = (posStr || '').toLowerCase().replace(/형용동사/g, '');
+        return (
+          p.includes('동사') ||
+          p.includes('5단') ||
+          p.includes('일단') ||
+          p.includes('스루') ||
+          p.includes('する')
+        );
+      };
+      const isAdvEtcPos = (posStr) => {
+        const p = (posStr || '').toLowerCase();
+        return (
+          p.includes('부사') ||
+          p.includes('관용') ||
+          p.includes('표현') ||
+          p.includes('감탄') ||
+          p.includes('접속') ||
+          p.includes('연어') ||
+          p.includes('구') ||
+          (!isNounPos(p) && !isAdjPos(p) && !isVerbPos(p))
+        );
+      };
+
+      const wordMatchesPosFilter = (word, filterId) => {
+        if (!filterId || filterId === 'all') return true;
+        const meanings = word.meanings || [];
+        if (meanings.length === 0) return filterId === 'adv_etc';
+        if (filterId === 'noun') return meanings.some(m => isNounPos(m.partOfSpeech));
+        if (filterId === 'verb') return meanings.some(m => isVerbPos(m.partOfSpeech));
+        if (filterId === 'adj') return meanings.some(m => isAdjPos(m.partOfSpeech));
+        if (filterId === 'adv_etc') return meanings.some(m => isAdvEtcPos(m.partOfSpeech));
+        return true;
+      };
+
       const filteredAndSortedWords = useMemo(() => {
         const q = searchQuery.trim().toLowerCase();
         const filtered = words.filter(w => {
           if (statusFilter === 'favorite' && !w.is_favorite) return false;
           if (statusFilter !== 'all' && statusFilter !== 'favorite' && w.memorization_status !== statusFilter) return false;
+          if (!wordMatchesPosFilter(w, posFilter)) return false;
           if (!q) return true;
           return (
             w.kanji.toLowerCase().includes(q) ||
@@ -752,7 +799,7 @@
           if (sortBy === 'status') return statusOrder[a.memorization_status] - statusOrder[b.memorization_status];
           return 0;
         });
-      }, [words, searchQuery, sortBy, statusFilter]);
+      }, [words, searchQuery, sortBy, statusFilter, posFilter]);
 
       const selectedWord = useMemo(
         () => words.find(w => w.id === selectedWordId) || words[0] || null,
@@ -1189,6 +1236,9 @@
         if (statusFilter === 'memorized' || statusFilter === 'favorite') {
           setStatusFilter('all');
         }
+        if (posFilter !== 'all') {
+          setPosFilter('all');
+        }
         setWords(prev => [item, ...prev]);
         setSelectedWordId(item.id);
         if (dbRef.current) {
@@ -1263,9 +1313,18 @@
       };
 
       const memorizedCount = words.filter(w => w.memorization_status === 'memorized').length;
+      const learningCount = words.length - memorizedCount;
+      const favoriteCount = words.filter(w => w.is_favorite).length;
+      const posCounts = useMemo(() => ({
+        noun: words.filter(w => wordMatchesPosFilter(w, 'noun')).length,
+        verb: words.filter(w => wordMatchesPosFilter(w, 'verb')).length,
+        adj: words.filter(w => wordMatchesPosFilter(w, 'adj')).length,
+        adv_etc: words.filter(w => wordMatchesPosFilter(w, 'adv_etc')).length,
+      }), [words]);
 
       const renderDetailCard = (targetWord, isInlineMobile = false) => {
         if (!targetWord) return null;
+        const detailMaskF = hideFurigana && !revealedFuriganaIds.has(targetWord.id);
         return (
           <div className={`rounded-2xl border border-indigo-200 bg-white p-4 sm:p-5 shadow-sm ${isInlineMobile ? 'border-l-4 border-l-indigo-600 bg-indigo-50/10' : ''}`}>
             <div className="border-b border-slate-100 pb-4">
@@ -1290,10 +1349,32 @@
                 </div>
               ) : (
                 <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2.5">
-                    <h2 className="font-jp text-2xl sm:text-3xl font-black leading-relaxed text-slate-900">
-                      {renderJapaneseWithFurigana(targetWord.kanji, { fallbackKana: targetWord.kana, hideFurigana })}
+                  <div className="flex flex-wrap items-center gap-2.5">
+                    <h2
+                      onClick={() => {
+                        if (detailMaskF) {
+                          const next = new Set(revealedFuriganaIds);
+                          next.add(targetWord.id);
+                          setRevealedFuriganaIds(next);
+                        }
+                      }}
+                      className={`font-jp text-2xl sm:text-3xl font-black leading-relaxed text-slate-900 ${detailMaskF ? 'cursor-pointer' : ''}`}
+                    >
+                      {renderJapaneseWithFurigana(targetWord.kanji, { fallbackKana: targetWord.kana, hideFurigana: detailMaskF })}
                     </h2>
+                    {detailMaskF && hasKanjiCharacter(targetWord.kanji) && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const next = new Set(revealedFuriganaIds);
+                          next.add(targetWord.id);
+                          setRevealedFuriganaIds(next);
+                        }}
+                        className="rounded-lg border border-dashed border-teal-400 bg-teal-50/80 px-2 py-0.5 text-[11px] font-bold text-teal-700 hover:bg-teal-100"
+                      >
+                        👆 후리가나 보기
+                      </button>
+                    )}
                     <button onClick={() => speakJapanese(targetWord.kana || targetWord.kanji)} className="rounded-lg bg-indigo-50 px-2 py-1 text-xs text-indigo-600">🔊</button>
                   </div>
                   <div className="flex items-center gap-1">
@@ -1371,8 +1452,17 @@
                       <div key={ex.id} className="rounded-xl border border-slate-200 bg-white p-3">
                         <div className="flex items-start justify-between gap-2">
                           <div className="space-y-1">
-                            <p className="font-jp text-sm font-bold leading-relaxed text-slate-900">
-                              {renderJapaneseWithFurigana(ex.japanese, { hideFurigana })}
+                            <p
+                              onClick={() => {
+                                if (detailMaskF) {
+                                  const next = new Set(revealedFuriganaIds);
+                                  next.add(targetWord.id);
+                                  setRevealedFuriganaIds(next);
+                                }
+                              }}
+                              className={`font-jp text-sm font-bold leading-relaxed text-slate-900 ${detailMaskF ? 'cursor-pointer' : ''}`}
+                            >
+                              {renderJapaneseWithFurigana(ex.japanese, { hideFurigana: detailMaskF })}
                             </p>
                             <p className="text-xs font-medium text-slate-600">{ex.korean}</p>
                           </div>
@@ -1561,7 +1651,7 @@
                     {hideMeaning ? '🙈 뜻 숨김' : '👁️ 뜻 숨기기'}
                   </button>
                   <button
-                    onClick={() => setHideFurigana(!hideFurigana)}
+                    onClick={() => { setHideFurigana(!hideFurigana); setRevealedFuriganaIds(new Set()); }}
                     className={`whitespace-nowrap rounded-xl border px-2 py-2 text-center text-xs font-bold transition ${hideFurigana ? 'bg-teal-600 text-white border-teal-600' : 'bg-white text-slate-700 border-slate-200'}`}
                   >
                     {hideFurigana ? 'あ 후리가나 숨김' : 'あ 후리가나 숨기기'}
@@ -1581,9 +1671,9 @@
                 <div className="flex flex-wrap gap-1.5">
                   {[
                     { id: 'all', label: `전체 (${words.length})` },
-                    { id: 'learning', label: '학습중' },
+                    { id: 'learning', label: `학습중 (${learningCount})` },
                     { id: 'memorized', label: `암기완료 (${memorizedCount})` },
-                    { id: 'favorite', label: '⭐ 즐겨찾기' },
+                    { id: 'favorite', label: `⭐ 즐겨찾기 (${favoriteCount})` },
                   ].map(tab => (
                     <button
                       key={tab.id}
@@ -1612,6 +1702,31 @@
                   ))}
                 </div>
               </div>
+
+              {/* 품사별 카테고리 필터 (전체 / 명사 / 동사 / 형용사 / 부사·관용구) */}
+              <div className="flex flex-wrap items-center gap-1.5 border-t border-slate-100 pt-2">
+                <span className="mr-0.5 text-[11px] font-bold text-slate-400">품사:</span>
+                {[
+                  { id: 'all', label: '전체 품사' },
+                  { id: 'noun', label: `명사 (${posCounts.noun})` },
+                  { id: 'verb', label: `동사 (${posCounts.verb})` },
+                  { id: 'adj', label: `형용사 (${posCounts.adj})` },
+                  { id: 'adv_etc', label: `부사·관용구 (${posCounts.adv_etc})` },
+                ].map(cat => (
+                  <button
+                    key={cat.id}
+                    type="button"
+                    onClick={() => setPosFilter(cat.id)}
+                    className={`rounded-lg px-2.5 py-1 text-xs font-semibold transition ${
+                      posFilter === cat.id
+                        ? 'bg-violet-600 text-white shadow-2xs'
+                        : 'bg-slate-50 text-slate-600 border border-slate-200/80 hover:bg-slate-100'
+                    }`}
+                  >
+                    {cat.label}
+                  </button>
+                ))}
+              </div>
             </div>
 
             {/* 반응형 대시보드:
@@ -1623,10 +1738,12 @@
                 {filteredAndSortedWords.map(word => {
                   const maskW = hideWord && !revealedWordIds.has(word.id);
                   const maskM = hideMeaning && !revealedMeaningIds.has(word.id);
+                  const maskF = hideFurigana && !revealedFuriganaIds.has(word.id);
                   const isMemorized = word.memorization_status === 'memorized';
                   const isSelected = word.id === selectedWordId;
                   const isDragging = draggingWordId === word.id;
                   const repExample = word.meanings.find(m => m.examples && m.examples.length > 0)?.examples[0] || null;
+                  const wordHasKanji = hasKanjiCharacter(word.kanji) || (repExample && hasKanjiCharacter(repExample.japanese));
 
                   return (
                     <div key={word.id} data-word-id={word.id} className="space-y-2">
@@ -1728,8 +1845,34 @@
                                 👆 터치하여 일본어 단어 확인
                               </button>
                             ) : (
-                              <div className="font-jp text-2xl sm:text-[28px] font-extrabold leading-relaxed text-slate-900">
-                                {renderJapaneseWithFurigana(word.kanji, { fallbackKana: word.kana, hideFurigana })}
+                              <div className="space-y-1">
+                                {maskF && wordHasKanji && (
+                                  <button
+                                    type="button"
+                                    onClick={e => {
+                                      e.stopPropagation();
+                                      const next = new Set(revealedFuriganaIds);
+                                      next.add(word.id);
+                                      setRevealedFuriganaIds(next);
+                                    }}
+                                    className="inline-flex items-center gap-1 rounded-lg border border-dashed border-teal-400 bg-teal-50/70 px-2.5 py-0.5 text-[11px] font-bold text-teal-700 hover:bg-teal-100 active:scale-95 transition"
+                                  >
+                                    👆 터치하여 후리가나 확인
+                                  </button>
+                                )}
+                                <div
+                                  onClick={e => {
+                                    if (maskF && wordHasKanji) {
+                                      e.stopPropagation();
+                                      const next = new Set(revealedFuriganaIds);
+                                      next.add(word.id);
+                                      setRevealedFuriganaIds(next);
+                                    }
+                                  }}
+                                  className="font-jp text-2xl sm:text-[28px] font-extrabold leading-relaxed text-slate-900"
+                                >
+                                  {renderJapaneseWithFurigana(word.kanji, { fallbackKana: word.kana, hideFurigana: maskF })}
+                                </div>
                               </div>
                             )}
                           </div>
@@ -1766,8 +1909,18 @@
                           <div className="mt-3 flex items-center justify-between gap-2 rounded-xl bg-slate-50 px-3.5 py-2.5 border border-slate-100">
                             <div className="space-y-0.5">
                               {!maskW ? (
-                                <p className="font-jp text-xs sm:text-sm font-bold leading-relaxed text-slate-800">
-                                  💬 {renderJapaneseWithFurigana(repExample.japanese, { hideFurigana })}
+                                <p
+                                  onClick={e => {
+                                    if (maskF && wordHasKanji) {
+                                      e.stopPropagation();
+                                      const next = new Set(revealedFuriganaIds);
+                                      next.add(word.id);
+                                      setRevealedFuriganaIds(next);
+                                    }
+                                  }}
+                                  className="font-jp text-xs sm:text-sm font-bold leading-relaxed text-slate-800"
+                                >
+                                  💬 {renderJapaneseWithFurigana(repExample.japanese, { hideFurigana: maskF })}
                                 </p>
                               ) : (
                                 <p className="text-xs italic text-slate-400">💬 (단어 숨김 모드)</p>
